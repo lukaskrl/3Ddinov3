@@ -39,12 +39,13 @@ ibot:
   head_nlayers: 3
   head_hidden_dim: 2048
 train:
-  batch_size_per_gpu: 64
-  dataset_path: ImageNet:split=TRAIN
+  batch_size_per_gpu: 4
+  # dataset_path: ImageNet:split=TRAIN
+  dataset_path: "Imagenette:split=TRAIN:root=/home/lukas/dinov3/data/imagenet/imagenette2:extra=/home/lukas/dinov3/data/imagenet/imagenette2"  # ... rest of train config ...
   output_dir: /checkpoint/dino/qas/rope/vitl16_im1k
   saveckp_freq: 20
   seed: 0
-  num_workers: 10
+  num_workers: 5
   OFFICIAL_EPOCH_LENGTH: 1250
   monitor_gradient_norm: false
   chunk_schedule: []

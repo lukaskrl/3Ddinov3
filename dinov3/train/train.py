@@ -16,6 +16,7 @@ from pathlib import Path
 import torch
 import torch.distributed
 from torch.distributed._tensor import DTensor
+from torch.utils.tensorboard import SummaryWriter
 
 import dinov3.distributed as distributed
 from dinov3.checkpointer import (
@@ -431,153 +432,170 @@ def do_train(cfg, model, resume=False):
     logger.info("Starting training from iteration %d", start_iter)
     metrics_file = os.path.join(cfg.train.output_dir, "training_metrics.json")
     metric_logger = MetricLogger(delimiter="  ", output_file=metrics_file)
+    tb_writer = None
+    if distributed.is_main_process():
+        tb_log_dir = os.path.join(cfg.train.output_dir, "tensorboard")
+        tb_writer = SummaryWriter(log_dir=tb_log_dir)
     # Manual garbage collection
     gc.disable()
     gc.collect()
 
     # Training loop
-    student = model.student
-    iteration = start_iter
-    num_gram_updates = 0
-    if (
-        cfg.gram.use_loss
-        and model.has_gram_teacher
-        and cfg.gram.rep_update
-        and start_iter > 0
-        and start_iter >= cfg.gram.it_first_update
-    ):
-        # If `start_iter == it_first_update`, we have performed one gram teacher update after
-        # iteration `start_iter - 1`, except if we are starting training from scratch and `start_iter == 0`.
-        num_gram_updates = math.ceil((start_iter + 1 - cfg.gram.it_first_update) / cfg.gram.update_frequency)
-        logger.info(f"Gram was updated {num_gram_updates} times before iteration {start_iter}")
-    consecutive_nan_count = 0
-    for data in metric_logger.log_every(
-        data_loader,
-        print_freq=10,
-        header="Training",
-        n_iterations=max_iter,
-        start_iteration=start_iter,
-    ):
-        it = iteration
-        data["global_batch_size"] = global_batch_size
-        if iteration > max_iter:
-            return
-
-        # Garbage collection (trigger manually so it happens on all ranks at the same time)
-        if (iteration + 1) % 150 == 0:
-            logger.info("Garbage collection")
-            gc.collect()
-
-        if cfg.gram.use_loss and model.gram_it_load_ema_teacher == it:
-            logger.info(f"Loading EMA teacher into Gram teacher before iteration {it}")
-            model.gram_load_ema_teacher()
-
-        # Learning rates and other schedules
-        lr = lr_schedule[it]
-        wd = wd_schedule[it]
-        mom = momentum_schedule[it]
-        teacher_temp = teacher_temp_schedule[it]
-        last_layer_lr = last_layer_lr_schedule[it]
-        apply_optim_scheduler(optimizer, lr, wd, last_layer_lr)
-
-        # Forward backward
-        optimizer.zero_grad(set_to_none=True)
-        total_loss, metrics_dict = model.forward_backward(data, teacher_temp=teacher_temp, iteration=it)
-
-        # Gradient clipping
-        if cfg.optim.clip_grad:
-            for k, v in student.items():
-                grad_norm = torch.nn.utils.clip_grad_norm_(
-                    v.parameters(),
-                    max_norm=cfg.optim.clip_grad,
-                )
-                metrics_dict[f"{k}_grad_norm"] = (
-                    grad_norm.full_tensor().item()
-                    if isinstance(grad_norm, torch.distributed.tensor.DTensor)
-                    else grad_norm.item()
-                )
-
-        # Reduce total_loss to check for NaNs, reduce metrics for logging
-        total_loss_all_ranks = total_loss.new_empty(distributed.get_subgroup_size())
-        torch.distributed.all_gather_into_tensor(
-            total_loss_all_ranks,
-            total_loss.detach(),
-            group=distributed.get_process_subgroup(),
-        )
-        total_loss = total_loss_all_ranks.mean()
-        metrics_values = torch.stack(
-            [torch.as_tensor(v, dtype=torch.float32, device=total_loss.device).detach() for v in metrics_dict.values()]
-        )
-        torch.distributed.all_reduce(
-            metrics_values,
-            op=torch.distributed.ReduceOp.AVG,
-            group=distributed.get_process_subgroup(),
-        )
-        metrics_dict = dict(zip(metrics_dict.keys(), metrics_values))
-        if total_loss_all_ranks.isnan().any():
-            consecutive_nan_count += 1
-            which_ranks = total_loss_all_ranks.isnan().nonzero().flatten().tolist()
-            logger.warning("NaN loss detected on ranks: %s", which_ranks)
-            logger.warning("Consecutive NaNs: %d", consecutive_nan_count)
-            metrics_dict_str = "\n".join([f"{k}: {v}" for k, v in metrics_dict.items()])
-            logger.warning("All-reduced metrics:\n%s", metrics_dict_str)
-            if consecutive_nan_count > 2 and not cfg.multidistillation.enabled:
-                msg = "Too many consecutive nans detected in loss, aborting..."
-                logger.error(msg)
-                raise RuntimeError(msg)
-        else:
-            consecutive_nan_count = 0
-        # Step optimizer
-        optimizer.step()
-        model.update_ema(mom)
-
-        # [GRAM] Update gram teacher when using gram teacher and frequent updates
+    try:
+        student = model.student
+        iteration = start_iter
+        num_gram_updates = 0
         if (
             cfg.gram.use_loss
-            and model.gram_rep_update
-            and (it + 1) >= model.gram_it_first_update
-            and (it + 1) % model.gram_update_frequency == 0
-            and (cfg.gram.max_updates is None or num_gram_updates < cfg.gram.max_updates)
+            and model.has_gram_teacher
+            and cfg.gram.rep_update
+            and start_iter > 0
+            and start_iter >= cfg.gram.it_first_update
         ):
-            logger.info(f"Updating Gram teacher from EMA teacher after iteration {it}")
-            model.update_gram()
-            num_gram_updates += 1
-
-        # Log metrics
-        metric_logger.update(lr=lr)
-        metric_logger.update(wd=wd)
-        metric_logger.update(mom=mom)
-        metric_logger.update(last_layer_lr=last_layer_lr)
-        metric_logger.update(total_loss=total_loss, **metrics_dict)
-
-        # Submit evaluation jobs
-        if (
-            cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0
-            # and iteration != max_iter - 1
+            # If `start_iter == it_first_update`, we have performed one gram teacher update after
+            # iteration `start_iter - 1`, except if we are starting training from scratch and `start_iter == 0`.
+            num_gram_updates = math.ceil((start_iter + 1 - cfg.gram.it_first_update) / cfg.gram.update_frequency)
+            logger.info(f"Gram was updated {num_gram_updates} times before iteration {start_iter}")
+        consecutive_nan_count = 0
+        for data in metric_logger.log_every(
+            data_loader,
+            print_freq=10,
+            header="Training",
+            n_iterations=max_iter,
+            start_iteration=start_iter,
         ):
-            do_test(cfg, model, f"training_{iteration}", process_group=process_subgroup)
-            torch.cuda.synchronize()
+            it = iteration
+            data["global_batch_size"] = global_batch_size
+            if iteration > max_iter:
+                break
 
-        # Checkpointing
-        if (iteration + 1) % cfg.checkpointing.period == 0:
-            torch.cuda.synchronize()
-            save_checkpoint(
-                ckpt_dir / str(iteration),
-                iteration=iteration,
-                model=model,
-                optimizer=optimizer,
-                overwrite=True,
-                process_group=process_subgroup,
+            # Garbage collection (trigger manually so it happens on all ranks at the same time)
+            if (iteration + 1) % 150 == 0:
+                logger.info("Garbage collection")
+                gc.collect()
+
+            if cfg.gram.use_loss and model.gram_it_load_ema_teacher == it:
+                logger.info(f"Loading EMA teacher into Gram teacher before iteration {it}")
+                model.gram_load_ema_teacher()
+
+            # Learning rates and other schedules
+            lr = lr_schedule[it]
+            wd = wd_schedule[it]
+            mom = momentum_schedule[it]
+            teacher_temp = teacher_temp_schedule[it]
+            last_layer_lr = last_layer_lr_schedule[it]
+            apply_optim_scheduler(optimizer, lr, wd, last_layer_lr)
+
+            # Forward backward
+            optimizer.zero_grad(set_to_none=True)
+            total_loss, metrics_dict = model.forward_backward(data, teacher_temp=teacher_temp, iteration=it)
+
+            # Gradient clipping
+            if cfg.optim.clip_grad:
+                for k, v in student.items():
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        v.parameters(),
+                        max_norm=cfg.optim.clip_grad,
+                    )
+                    metrics_dict[f"{k}_grad_norm"] = (
+                        grad_norm.full_tensor().item()
+                        if isinstance(grad_norm, torch.distributed.tensor.DTensor)
+                        else grad_norm.item()
+                    )
+
+            # Reduce total_loss to check for NaNs, reduce metrics for logging
+            total_loss_all_ranks = total_loss.new_empty(distributed.get_subgroup_size())
+            torch.distributed.all_gather_into_tensor(
+                total_loss_all_ranks,
+                total_loss.detach(),
+                group=distributed.get_process_subgroup(),
             )
-            if distributed.is_subgroup_main_process():
-                keep_last_n_checkpoints(ckpt_dir, cfg.checkpointing.max_to_keep)
-                if "keep_every" in cfg.checkpointing and (iteration + 1) % cfg.checkpointing.keep_every == 0:
-                    keep_checkpoint_copy(ckpt_dir / str(iteration))
+            total_loss = total_loss_all_ranks.mean()
+            metrics_values = torch.stack(
+                [torch.as_tensor(v, dtype=torch.float32, device=total_loss.device).detach() for v in metrics_dict.values()]
+            )
+            torch.distributed.all_reduce(
+                metrics_values,
+                op=torch.distributed.ReduceOp.AVG,
+                group=distributed.get_process_subgroup(),
+            )
+            metrics_dict = dict(zip(metrics_dict.keys(), metrics_values))
+            if total_loss_all_ranks.isnan().any():
+                consecutive_nan_count += 1
+                which_ranks = total_loss_all_ranks.isnan().nonzero().flatten().tolist()
+                logger.warning("NaN loss detected on ranks: %s", which_ranks)
+                logger.warning("Consecutive NaNs: %d", consecutive_nan_count)
+                metrics_dict_str = "\n".join([f"{k}: {v}" for k, v in metrics_dict.items()])
+                logger.warning("All-reduced metrics:\n%s", metrics_dict_str)
+                if consecutive_nan_count > 2 and not cfg.multidistillation.enabled:
+                    msg = "Too many consecutive nans detected in loss, aborting..."
+                    logger.error(msg)
+                    raise RuntimeError(msg)
+            else:
+                consecutive_nan_count = 0
+            # Step optimizer
+            optimizer.step()
+            model.update_ema(mom)
 
-        iteration = iteration + 1
-    metric_logger.synchronize_between_processes()
+            # [GRAM] Update gram teacher when using gram teacher and frequent updates
+            if (
+                cfg.gram.use_loss
+                and model.gram_rep_update
+                and (it + 1) >= model.gram_it_first_update
+                and (it + 1) % model.gram_update_frequency == 0
+                and (cfg.gram.max_updates is None or num_gram_updates < cfg.gram.max_updates)
+            ):
+                logger.info(f"Updating Gram teacher from EMA teacher after iteration {it}")
+                model.update_gram()
+                num_gram_updates += 1
 
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+            # Log metrics
+            metric_logger.update(lr=lr)
+            metric_logger.update(wd=wd)
+            metric_logger.update(mom=mom)
+            metric_logger.update(last_layer_lr=last_layer_lr)
+            metric_logger.update(total_loss=total_loss, **metrics_dict)
+            if tb_writer is not None:
+                tb_writer.add_scalar("train/lr", float(lr), iteration)
+                tb_writer.add_scalar("train/wd", float(wd), iteration)
+                tb_writer.add_scalar("train/momentum", float(mom), iteration)
+                tb_writer.add_scalar("train/last_layer_lr", float(last_layer_lr), iteration)
+                tb_writer.add_scalar("train/total_loss", float(total_loss.item()), iteration)
+                for metric_name, metric_value in metrics_dict.items():
+                    scalar_value = metric_value.item() if isinstance(metric_value, torch.Tensor) else float(metric_value)
+                    tb_writer.add_scalar(f"train/{metric_name}", scalar_value, iteration)
+
+            # Submit evaluation jobs
+            if (
+                cfg.evaluation.eval_period_iterations > 0 and (iteration + 1) % cfg.evaluation.eval_period_iterations == 0
+                # and iteration != max_iter - 1
+            ):
+                do_test(cfg, model, f"training_{iteration}", process_group=process_subgroup)
+                torch.cuda.synchronize()
+
+            # Checkpointing
+            if (iteration + 1) % cfg.checkpointing.period == 0:
+                torch.cuda.synchronize()
+                save_checkpoint(
+                    ckpt_dir / str(iteration),
+                    iteration=iteration,
+                    model=model,
+                    optimizer=optimizer,
+                    overwrite=True,
+                    process_group=process_subgroup,
+                )
+                if distributed.is_subgroup_main_process():
+                    keep_last_n_checkpoints(ckpt_dir, cfg.checkpointing.max_to_keep)
+                    if "keep_every" in cfg.checkpointing and (iteration + 1) % cfg.checkpointing.keep_every == 0:
+                        keep_checkpoint_copy(ckpt_dir / str(iteration))
+
+            iteration = iteration + 1
+        metric_logger.synchronize_between_processes()
+
+        return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    finally:
+        if tb_writer is not None:
+            tb_writer.close()
 
 
 def main(argv=None):
