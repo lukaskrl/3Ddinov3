@@ -144,7 +144,7 @@ def ac_compile_parallelize(
         raise NotImplementedError
 
     from dinov3.models.convnext import ConvNeXt
-    from dinov3.models.vision_transformer import DinoVisionTransformer
+    from dinov3.models.vision_transformer import DinoVisionTransformer, DinoVisionTransformer3D
 
     # FSDP utils for each architecture type
     ARCH_TYPE_MAP = {
@@ -154,6 +154,12 @@ def ac_compile_parallelize(
             activation_checkpointing_fn=activation_checkpoint_convnext,
         ),
         DinoVisionTransformer: dict(
+            compile_fn=compile_transformer,
+            fsdp_fn=fsdp_transformer,
+            activation_checkpointing_fn=activation_checkpoint_transformer,
+        ),
+        # 3D ViT backbone shares the same transformer/FSDP logic as the 2D one.
+        DinoVisionTransformer3D: dict(
             compile_fn=compile_transformer,
             fsdp_fn=fsdp_transformer,
             activation_checkpointing_fn=activation_checkpoint_transformer,

@@ -358,6 +358,11 @@ def build_multi_resolution_data_loader_from_cfg(
     start_iter,
     seed=65537,
 ):
+    # Multi-resolution is currently only supported for 2D configs
+    if getattr(cfg.crops, "use_3d_augmentation", False):
+        # For 3D, just use the single-resolution loader
+        return build_data_loader_from_cfg(cfg=cfg, model=model, start_iter=start_iter)
+
     global_crops_sizes = (
         [cfg.crops.global_crops_size] if isinstance(cfg.crops.global_crops_size, int) else cfg.crops.global_crops_size
     )

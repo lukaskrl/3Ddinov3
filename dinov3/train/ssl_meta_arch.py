@@ -438,7 +438,13 @@ class SSLMetaArch(nn.Module):
         teacher_temp,
         n_masked_patches_tensor,
     ):
-        n_crops, B, rgb, H, W = images.shape
+        # images: [n_crops, B, C, H, W] for 2D or [n_crops, B, C, D, H, W] for 3D
+        if images.ndim == 5:
+            n_crops, B, rgb, H, W = images.shape  # 2D
+        elif images.ndim == 6:
+            n_crops, B, rgb, D, H, W = images.shape  # 3D, depth is handled inside the backbone
+        else:
+            raise ValueError(f"Unsupported teacher input shape: {images.shape}")
         images = images.flatten(0, 1)
 
         backbone_out = self.teacher.backbone(images, is_training=True)
@@ -528,8 +534,15 @@ class SSLMetaArch(nn.Module):
         }
 
     def get_student_output(self, *, global_crops, local_crops, upperbound, masks, mask_indices_list):
-        n_global_crops, B, rgb, H, W = global_crops.shape
-        n_local_crops, B, rgb, H, W = local_crops.shape
+        # global_crops/local_crops: [n_crops, B, C, H, W] for 2D or [n_crops, B, C, D, H, W] for 3D
+        if global_crops.ndim == 5:
+            n_global_crops, B, rgb, H, W = global_crops.shape
+            n_local_crops, B, rgb, H, W = local_crops.shape
+        elif global_crops.ndim == 6:
+            n_global_crops, B, rgb, D, H, W = global_crops.shape
+            n_local_crops, B, rgb, D, H, W = local_crops.shape
+        else:
+            raise ValueError(f"Unsupported student input shape: {global_crops.shape}")
 
         global_crops = global_crops.flatten(0, 1)
 

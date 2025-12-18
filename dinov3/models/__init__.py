@@ -83,12 +83,26 @@ def build_model(args, only_teacher=False, img_size=224, device=None):
 
 
 def build_model_from_cfg(cfg, only_teacher: bool = False):
+    # For 3D models, img_size is not used directly (kept for API compatibility).
+    # Use 3D crop size if available, otherwise fall back to 2D global_crops_size.
+    if getattr(cfg.crops, "use_3d_augmentation", False) and hasattr(cfg.crops, "global_crops_size_3d"):
+        # 3D case: use height from 3D crop size (or a default)
+        img_size = cfg.crops.global_crops_size_3d[1] if isinstance(cfg.crops.global_crops_size_3d, (list, tuple)) else 224
+    elif hasattr(cfg.crops, "global_crops_size"):
+        # 2D case: use global_crops_size
+        img_size = (
+            cfg.crops.global_crops_size
+            if isinstance(cfg.crops.global_crops_size, int)
+            else max(cfg.crops.global_crops_size)
+        )
+    else:
+        # Fallback default
+        img_size = 224
+
     outputs = build_model(
         cfg.student,
         only_teacher=only_teacher,
-        img_size=cfg.crops.global_crops_size
-        if isinstance(cfg.crops.global_crops_size, int)
-        else max(cfg.crops.global_crops_size),
+        img_size=img_size,
         device="meta",
     )
     if only_teacher:

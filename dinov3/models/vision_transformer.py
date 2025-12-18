@@ -62,6 +62,8 @@ def init_weights_vit(module: nn.Module, name: str = ""):
         module.reset_parameters()
     if isinstance(module, PatchEmbed):
         module.reset_parameters()
+    if isinstance(module, PatchEmbed3D):
+        module.reset_parameters()
     if isinstance(module, RMSNorm):
         module.reset_parameters()
 
@@ -740,7 +742,7 @@ def vit3d_base(patch_size=16, patch_size_d=2, **kwargs):
     model = DinoVisionTransformer3D(
         patch_size=patch_size,
         patch_size_d=patch_size_d,
-        embed_dim=768,
+        embed_dim=720,
         depth=12,
         num_heads=12,
         ffn_ratio=4,
@@ -753,7 +755,7 @@ def vit3d_large(patch_size=16, patch_size_d=2, **kwargs):
     model = DinoVisionTransformer3D(
         patch_size=patch_size,
         patch_size_d=patch_size_d,
-        embed_dim=1024,
+        embed_dim=960,
         depth=24,
         num_heads=16,
         ffn_ratio=4,
