@@ -11,7 +11,17 @@ import torch
 import torch.nn.init
 from torch import Tensor, nn
 
-from dinov3.layers import LayerScale, Mlp, PatchEmbed, RMSNorm, RopePositionEmbedding, SelfAttentionBlock, SwiGLUFFN
+from dinov3.layers import (
+    LayerScale,
+    Mlp,
+    PatchEmbed,
+    PatchEmbed3D,
+    RMSNorm,
+    RopePositionEmbedding,
+    RopePositionEmbedding3D,
+    SelfAttentionBlock,
+    SwiGLUFFN,
+)
 from dinov3.utils import named_apply
 
 logger = logging.getLogger("dinov3")
@@ -329,6 +339,316 @@ class DinoVisionTransformer(nn.Module):
             return self.head(ret["x_norm_clstoken"])
 
 
+class DinoVisionTransformer3D(nn.Module):
+    """
+    3D analogue of `DinoVisionTransformer` for volumetric inputs.
+
+    Inputs are expected in the form (B, C, D, H, W).
+    We keep the same heads / FFN / masking logic, but replace the patch
+    embedding with a 3D version and treat the patch grid as a flattened
+    2D grid for RoPE (by merging D and H into a single axis). This keeps
+    the RoPE implementation untouched while still giving distinct
+    positions to all 3D patches.
+    """
+
+    def __init__(
+        self,
+        *,
+        img_size: int = 224,  # kept for API compatibility, not used directly
+        patch_size: int = 16,
+        patch_size_d: int = 2,
+        in_chans: int = 1,
+        pos_embed_rope_base: float = 100.0,
+        pos_embed_rope_min_period: float | None = None,
+        pos_embed_rope_max_period: float | None = None,
+        pos_embed_rope_normalize_coords: Literal["min", "max", "separate"] = "separate",
+        pos_embed_rope_shift_coords: float | None = None,
+        pos_embed_rope_jitter_coords: float | None = None,
+        pos_embed_rope_rescale_coords: float | None = None,
+        pos_embed_rope_dtype: str = "bf16",
+        embed_dim: int = 768,
+        depth: int = 12,
+        num_heads: int = 12,
+        ffn_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        drop_path_rate: float = 0.0,
+        layerscale_init: float | None = None,
+        norm_layer: str = "layernorm",
+        ffn_layer: str = "mlp",
+        ffn_bias: bool = True,
+        proj_bias: bool = True,
+        n_storage_tokens: int = 0,
+        mask_k_bias: bool = False,
+        untie_cls_and_patch_norms: bool = False,
+        untie_global_and_local_cls_norm: bool = False,
+        device: Any | None = None,
+        **ignored_kwargs,
+    ):
+        super().__init__()
+        if len(ignored_kwargs) > 0:
+            logger.warning(f"Ignored kwargs (3D ViT): {ignored_kwargs}")
+        del ignored_kwargs
+
+        norm_layer_cls = norm_layer_dict[norm_layer]
+
+        self.num_features = self.embed_dim = embed_dim
+        self.n_blocks = depth
+        self.num_heads = num_heads
+        self.patch_size = patch_size
+        self.patch_size_d = patch_size_d
+
+        # 3D patch embedding
+        self.patch_embed = PatchEmbed3D(
+            img_size_3d=(0, 0, 0),  # allow variable depth/height/width at runtime
+            patch_size_3d=(patch_size_d, patch_size, patch_size),
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+            flatten_embedding=False,
+        )
+
+        self.cls_token = nn.Parameter(torch.empty(1, 1, embed_dim, device=device))
+        self.n_storage_tokens = n_storage_tokens
+        if self.n_storage_tokens > 0:
+            self.storage_tokens = nn.Parameter(torch.empty(1, n_storage_tokens, embed_dim, device=device))
+        logger.info(f"[3D] using base={pos_embed_rope_base} for rope")
+        logger.info(f"[3D] using min_period={pos_embed_rope_min_period} for rope")
+        logger.info(f"[3D] using max_period={pos_embed_rope_max_period} for rope")
+        logger.info(f"[3D] using normalize_coords={pos_embed_rope_normalize_coords} for rope")
+        logger.info(f"[3D] using shift_coords={pos_embed_rope_shift_coords} for rope")
+        logger.info(f"[3D] using rescale_coords={pos_embed_rope_rescale_coords} for rope")
+        logger.info(f"[3D] using jitter_coords={pos_embed_rope_jitter_coords} for rope")
+        logger.info(f"[3D] using dtype={pos_embed_rope_dtype} for rope")
+        self.rope_embed = RopePositionEmbedding3D(
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            base=pos_embed_rope_base,
+            min_period=pos_embed_rope_min_period,
+            max_period=pos_embed_rope_max_period,
+            normalize_coords=pos_embed_rope_normalize_coords,
+            shift_coords=pos_embed_rope_shift_coords,
+            jitter_coords=pos_embed_rope_jitter_coords,
+            rescale_coords=pos_embed_rope_rescale_coords,
+            dtype=dtype_dict[pos_embed_rope_dtype],
+            device=device,
+        )
+
+        logger.info(f"[3D] using {ffn_layer} layer as FFN")
+        ffn_layer_cls = ffn_layer_dict[ffn_layer]
+        ffn_ratio_sequence = [ffn_ratio] * depth
+        blocks_list = [
+            SelfAttentionBlock(
+                dim=embed_dim,
+                num_heads=num_heads,
+                ffn_ratio=ffn_ratio_sequence[i],
+                qkv_bias=qkv_bias,
+                proj_bias=proj_bias,
+                ffn_bias=ffn_bias,
+                drop_path=drop_path_rate,
+                norm_layer=norm_layer_cls,
+                act_layer=nn.GELU,
+                ffn_layer=ffn_layer_cls,
+                init_values=layerscale_init,
+                mask_k_bias=mask_k_bias,
+                device=device,
+            )
+            for i in range(depth)
+        ]
+
+        self.chunked_blocks = False
+        self.blocks = nn.ModuleList(blocks_list)
+
+        self.norm = norm_layer_cls(embed_dim)
+
+        self.untie_cls_and_patch_norms = untie_cls_and_patch_norms
+        if untie_cls_and_patch_norms:
+            self.cls_norm = norm_layer_cls(embed_dim)
+        else:
+            self.cls_norm = None
+
+        self.untie_global_and_local_cls_norm = untie_global_and_local_cls_norm
+        if untie_global_and_local_cls_norm:
+            self.local_cls_norm = norm_layer_cls(embed_dim)
+        else:
+            self.local_cls_norm = None
+
+        self.head = nn.Identity()
+        self.mask_token = nn.Parameter(torch.empty(1, embed_dim, device=device))
+
+    def init_weights(self):
+        self.rope_embed._init_weights()
+        nn.init.normal_(self.cls_token, std=0.02)
+        if self.n_storage_tokens > 0:
+            nn.init.normal_(self.storage_tokens, std=0.02)
+        nn.init.zeros_(self.mask_token)
+        named_apply(init_weights_vit, self)
+
+    def prepare_tokens_with_masks(self, x: Tensor, masks=None) -> Tuple[Tensor, Tuple[int, int, int]]:
+        """
+        x: (B, C, D, H, W)
+        We treat the 3D patch grid as a 2D grid for RoPE by merging
+        D and H into a single axis, i.e. grid shape (D_p * H_p, W_p).
+        """
+        assert x.ndim == 5, f"DinoVisionTransformer3D expects (B, C, D, H, W) but got {tuple(x.shape)}"
+        x = self.patch_embed(x)  # (B, D_p, H_p, W_p, C)
+        B, Dp, Hp, Wp, _ = x.shape
+        x = x.reshape(B, Dp * Hp * Wp, -1)  # (B, N, C)
+
+        if masks is not None:
+            x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
+            cls_token = self.cls_token
+        else:
+            cls_token = self.cls_token + 0 * self.mask_token
+        if self.n_storage_tokens > 0:
+            storage_tokens = self.storage_tokens
+        else:
+            storage_tokens = torch.empty(
+                1,
+                0,
+                cls_token.shape[-1],
+                dtype=cls_token.dtype,
+                device=cls_token.device,
+            )
+
+        x = torch.cat(
+            [
+                cls_token.expand(B, -1, -1),
+                storage_tokens.expand(B, -1, -1),
+                x,
+            ],
+            dim=1,
+        )
+
+        return x, (Dp, Hp, Wp)
+
+    def forward_features_list(self, x_list: List[Tensor], masks_list: List[Tensor]) -> List[Dict[str, Tensor]]:
+        x = []
+        rope = []
+        for t_x, t_masks in zip(x_list, masks_list):
+            t2_x, dhw_tuple = self.prepare_tokens_with_masks(t_x, t_masks)
+            x.append(t2_x)
+            rope.append(dhw_tuple)
+        for _, blk in enumerate(self.blocks):
+            if self.rope_embed is not None:
+                rope_sincos = [self.rope_embed(D=D, H=H, W=W) for D, H, W in rope]
+            else:
+                rope_sincos = [None for _ in rope]
+            x = blk(x, rope_sincos)
+        all_x = x
+        output = []
+        for idx, (x, masks) in enumerate(zip(all_x, masks_list)):
+            if self.untie_cls_and_patch_norms or self.untie_global_and_local_cls_norm:
+                if self.untie_global_and_local_cls_norm and self.training and idx == 1:
+                    x_norm_cls_reg = self.local_cls_norm(x[:, : self.n_storage_tokens + 1])
+                elif self.untie_cls_and_patch_norms:
+                    x_norm_cls_reg = self.cls_norm(x[:, : self.n_storage_tokens + 1])
+                else:
+                    x_norm_cls_reg = self.norm(x[:, : self.n_storage_tokens + 1])
+                x_norm_patch = self.norm(x[:, self.n_storage_tokens + 1 :])
+            else:
+                x_norm = self.norm(x)
+                x_norm_cls_reg = x_norm[:, : self.n_storage_tokens + 1]
+                x_norm_patch = x_norm[:, self.n_storage_tokens + 1 :]
+            output.append(
+                {
+                    "x_norm_clstoken": x_norm_cls_reg[:, 0],
+                    "x_storage_tokens": x_norm_cls_reg[:, 1:],
+                    "x_norm_patchtokens": x_norm_patch,
+                    "x_prenorm": x,
+                    "masks": masks,
+                }
+            )
+        return output
+
+    def forward_features(self, x: Tensor | List[Tensor], masks: Optional[Tensor] = None) -> List[Dict[str, Tensor]]:
+        if isinstance(x, torch.Tensor):
+            return self.forward_features_list([x], [masks])[0]
+        else:
+            return self.forward_features_list(x, masks)
+
+    def _get_intermediate_layers_not_chunked(self, x: Tensor, n: int = 1) -> List[Tensor]:
+        """
+        3D analogue of the 2D helper used for feature extraction.
+
+        Runs a full forward through all blocks and collects hidden states
+        from the last `n` blocks (or specific indices if `n` is a sequence).
+        """
+        x, (D, H, W) = self.prepare_tokens_with_masks(x)
+        output, total_block_len = [], len(self.blocks)
+        blocks_to_take = range(total_block_len - n, total_block_len) if isinstance(n, int) else n
+        for i, blk in enumerate(self.blocks):
+            if self.rope_embed is not None:
+                rope_sincos = self.rope_embed(D=D, H=H, W=W)
+            else:
+                rope_sincos = None
+            x = blk(x, rope_sincos)
+            if i in blocks_to_take:
+                output.append(x)
+        assert len(output) == len(blocks_to_take), f"only {len(output)} / {len(blocks_to_take)} blocks found"
+        return output
+
+    def get_intermediate_layers(
+        self,
+        x: torch.Tensor,
+        *,
+        n: Union[int, Sequence] = 1,  # Layers or n last layers to take
+        reshape: bool = False,
+        return_class_token: bool = False,
+        return_extra_tokens: bool = False,
+        norm: bool = True,
+    ) -> Tuple[Union[torch.Tensor, Tuple[torch.Tensor, ...]]]:
+        """
+        3D version of `get_intermediate_layers`, returning hidden states from
+        selected transformer blocks.
+
+        When `reshape=True`, patch tokens are reshaped back to volumetric
+        feature maps of shape (B, C, D', H', W'), where D', H', W' are obtained
+        by dividing the original input size by the patch sizes.
+        """
+        outputs = self._get_intermediate_layers_not_chunked(x, n)
+        if norm:
+            outputs_normed = []
+            for out in outputs:
+                if self.untie_cls_and_patch_norms:
+                    x_norm_cls_reg = self.cls_norm(out[:, : self.n_storage_tokens + 1])
+                    x_norm_patch = self.norm(out[:, self.n_storage_tokens + 1 :])
+                    outputs_normed.append(torch.cat((x_norm_cls_reg, x_norm_patch), dim=1))
+                else:
+                    outputs_normed.append(self.norm(out))
+            outputs = outputs_normed
+
+        class_tokens = [out[:, 0] for out in outputs]
+        extra_tokens = [out[:, 1 : self.n_storage_tokens + 1] for out in outputs]
+        outputs = [out[:, self.n_storage_tokens + 1 :] for out in outputs]
+
+        if reshape:
+            B, _, D_in, H_in, W_in = x.shape
+            D_p = D_in // self.patch_size_d
+            H_p = H_in // self.patch_size
+            W_p = W_in // self.patch_size
+            outputs = [
+                out.reshape(B, D_p, H_p, W_p, -1)
+                .permute(0, 4, 1, 2, 3)
+                .contiguous()
+                for out in outputs
+            ]
+
+        if not return_class_token and not return_extra_tokens:
+            return tuple(outputs)
+        elif return_class_token and not return_extra_tokens:
+            return tuple(zip(outputs, class_tokens))
+        elif not return_class_token and return_extra_tokens:
+            return tuple(zip(outputs, extra_tokens))
+        elif return_class_token and return_extra_tokens:
+            return tuple(zip(outputs, class_tokens, extra_tokens))
+
+    def forward(self, *args, is_training: bool = False, **kwargs) -> List[Dict[str, Tensor]] | Tensor:
+        ret = self.forward_features(*args, **kwargs)
+        if is_training:
+            return ret
+        else:
+            return self.head(ret["x_norm_clstoken"])
+
+
 def vit_small(patch_size=16, **kwargs):
     model = DinoVisionTransformer(
         patch_size=patch_size,
@@ -411,6 +731,32 @@ def vit_7b(patch_size=16, **kwargs):
         depth=40,
         num_heads=32,
         ffn_ratio=3,
+        **kwargs,
+    )
+    return model
+
+
+def vit3d_base(patch_size=16, patch_size_d=2, **kwargs):
+    model = DinoVisionTransformer3D(
+        patch_size=patch_size,
+        patch_size_d=patch_size_d,
+        embed_dim=768,
+        depth=12,
+        num_heads=12,
+        ffn_ratio=4,
+        **kwargs,
+    )
+    return model
+
+
+def vit3d_large(patch_size=16, patch_size_d=2, **kwargs):
+    model = DinoVisionTransformer3D(
+        patch_size=patch_size,
+        patch_size_d=patch_size_d,
+        embed_dim=1024,
+        depth=24,
+        num_heads=16,
+        ffn_ratio=4,
         **kwargs,
     )
     return model

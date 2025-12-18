@@ -92,3 +92,99 @@ class MaskingGenerator:
         to_add = np.random.choice(np.where(~m2)[0], size=num_masking_patches - m2.sum(), replace=False)
         m2[to_add] = True
         return m2.reshape(shape)
+
+
+class MaskingGenerator3D:
+    """
+    3D analogue of MaskingGenerator for volumetric patch grids.
+
+    Operates on a (D, H, W) grid of patch indices and samples random cuboids
+    until the requested number of masked patches is reached (up to
+    `max_num_patches` per cuboid). The interface mirrors the 2D generator so
+    it can be dropped into the existing collate logic.
+    """
+
+    def __init__(
+        self,
+        input_size,
+        num_masking_patches=None,
+        min_num_patches=4,
+        max_num_patches=None,
+    ):
+        if not isinstance(input_size, tuple):
+            input_size = (input_size,) * 3
+        assert len(input_size) == 3, "MaskingGenerator3D expects a (D, H, W) tuple for input_size"
+        self.depth, self.height, self.width = input_size
+
+        self.num_patches = self.depth * self.height * self.width
+        self.num_masking_patches = num_masking_patches
+
+        self.min_num_patches = min_num_patches
+        self.max_num_patches = num_masking_patches if max_num_patches is None else max_num_patches
+
+    def __repr__(self):
+        repr_str = "Generator3D(%d, %d, %d -> [%d ~ %d], max = %d)" % (
+            self.depth,
+            self.height,
+            self.width,
+            self.min_num_patches,
+            self.max_num_patches,
+            self.num_masking_patches,
+        )
+        return repr_str
+
+    def get_shape(self):
+        return self.depth, self.height, self.width
+
+    def _mask(self, mask, max_mask_patches):
+        delta = 0
+        for _ in range(10):
+            target_volume = random.uniform(self.min_num_patches, max_mask_patches)
+
+            # Sample approximate cuboid dimensions around the cubic root of the volume
+            side = target_volume ** (1.0 / 3.0)
+            d = int(round(side * random.uniform(0.5, 1.5)))
+            h = int(round(side * random.uniform(0.5, 1.5)))
+            w = int(round(side * random.uniform(0.5, 1.5)))
+
+            if d < self.depth and h < self.height and w < self.width:
+                zd = random.randint(0, self.depth - d)
+                yh = random.randint(0, self.height - h)
+                xw = random.randint(0, self.width - w)
+
+                num_masked = mask[zd : zd + d, yh : yh + h, xw : xw + w].sum()
+                volume = d * h * w
+                # Overlap: accept if we add something and do not exceed max_mask_patches
+                if 0 < volume - num_masked <= max_mask_patches:
+                    for zz in range(zd, zd + d):
+                        for yy in range(yh, yh + h):
+                            for xx in range(xw, xw + w):
+                                if mask[zz, yy, xx] == 0:
+                                    mask[zz, yy, xx] = 1
+                                    delta += 1
+
+            if delta > 0:
+                break
+        return delta
+
+    def __call__(self, num_masking_patches=0):
+        mask = np.zeros(shape=self.get_shape(), dtype=bool)
+        mask_count = 0
+        while mask_count < num_masking_patches:
+            max_mask_patches = num_masking_patches - mask_count
+            max_mask_patches = min(max_mask_patches, self.max_num_patches)
+
+            delta = self._mask(mask, max_mask_patches)
+            if delta == 0:
+                break
+            else:
+                mask_count += delta
+
+        return self.complete_mask_randomly(mask, num_masking_patches)
+
+    def complete_mask_randomly(self, mask, num_masking_patches):
+        shape = mask.shape
+        m2 = mask.flatten()
+        to_add = np.random.choice(np.where(~m2)[0], size=num_masking_patches - m2.sum(), replace=False)
+        m2[to_add] = True
+        return m2.reshape(shape)

@@ -170,6 +170,29 @@ crops:
   - 0.224
   - 0.225
   teacher_to_student_resolution_scale: 1.0
+  # 3D CT‑specific augmentation options (used when use_3d_augmentation is true)
+  use_3d_augmentation: false
+  # Crop sizes are (D, H, W) in voxels
+  global_crops_size_3d:
+  - 64
+  - 192
+  - 192
+  local_crops_size_3d:
+  - 32
+  - 96
+  - 96
+  gram_teacher_crops_size_3d: null
+  # Patch size used to align local crops with patch grid; (D, H, W)
+  patch_size_3d:
+  - 2
+  - 16
+  - 16
+  # CT window in HU and optional per‑channel mean/std after windowing
+  ct_window:
+  - -1000.0
+  - 400.0
+  ct_mean: null
+  ct_std: null
 evaluation:
   eval_period_iterations: 12500
   low_freq_every: 5

@@ -14,7 +14,7 @@ from torch import Tensor, nn
 import dinov3.distributed as distributed
 from dinov3.checkpointer import init_fsdp_model_from_checkpoint
 from dinov3.configs import get_default_config
-from dinov3.data import DataAugmentationDINO
+from dinov3.data import DataAugmentationDINO, DataAugmentationDINO3D
 from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 from dinov3.layers.dino_head import DINOHead
 from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, iBOTPatchLoss
@@ -745,6 +745,40 @@ class SSLMetaArch(nn.Module):
             torch._foreach_add_(gramteacher_param_list, teacher_param_list, alpha=1 - m)
 
     def build_data_augmentation_dino(self, cfg):
+        """
+        Build the data augmentation pipeline for DINO.
+
+        For standard 2D image training we use DataAugmentationDINO (PIL / HxW).
+        For 3D CT volumes, enable cfg.crops.use_3d_augmentation and provide
+        the corresponding 3D crop sizes in cfg.crops.global_crops_size_3d and
+        cfg.crops.local_crops_size_3d.
+        """
+        if getattr(cfg.crops, "use_3d_augmentation", False):
+            global_size_3d = tuple(getattr(cfg.crops, "global_crops_size_3d"))
+            local_size_3d = tuple(getattr(cfg.crops, "local_crops_size_3d"))
+            gram_size_3d = (
+                tuple(getattr(cfg.crops, "gram_teacher_crops_size_3d"))
+                if getattr(cfg.crops, "gram_teacher_crops_size_3d", None) is not None
+                else None
+            )
+            patch_size_3d = tuple(getattr(cfg.crops, "patch_size_3d", (2, cfg.student.patch_size, cfg.student.patch_size)))
+
+            return DataAugmentationDINO3D(
+                cfg.crops.global_crops_scale,
+                cfg.crops.local_crops_scale,
+                cfg.crops.local_crops_number,
+                global_crops_size_3d=global_size_3d,
+                local_crops_size_3d=local_size_3d,
+                gram_teacher_crops_size_3d=gram_size_3d,
+                gram_teacher_no_distortions=cfg.crops.gram_teacher_no_distortions,
+                local_crops_subset_of_global_crops=cfg.crops.localcrops_subset_of_globalcrops,
+                patch_size_3d=patch_size_3d,
+                horizontal_flips=cfg.crops.horizontal_flips,
+                ct_window=getattr(cfg.crops, "ct_window", (-1000.0, 400.0)),
+                mean=getattr(cfg.crops, "ct_mean", None),
+                std=getattr(cfg.crops, "ct_std", None),
+            )
+
         return DataAugmentationDINO(
             cfg.crops.global_crops_scale,
             cfg.crops.local_crops_scale,

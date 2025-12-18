@@ -30,6 +30,7 @@ from dinov3.checkpointer import (
 from dinov3.configs import setup_config, setup_job, setup_multidistillation
 from dinov3.data import (
     MaskingGenerator,
+    MaskingGenerator3D,
     SamplerType,
     collate_data_and_cast,
     make_data_loader,
@@ -272,13 +273,32 @@ def build_data_loader_from_cfg(
     start_iter,
 ):
     # Collate function
-    img_size = cfg.crops.global_crops_size
-    patch_size = int(cfg.student.patch_size * cfg.crops.teacher_to_student_resolution_scale)
-    n_tokens = (img_size // patch_size) ** 2
-    mask_generator = MaskingGenerator(
-        input_size=(img_size // patch_size, img_size // patch_size),
-        max_num_patches=0.5 * img_size // patch_size * img_size // patch_size,
-    )
+    if getattr(cfg.crops, "use_3d_augmentation", False):
+        # 3D volumetric case: compute patch grid (D_p, H_p, W_p)
+        D_size, H_size, W_size = cfg.crops.global_crops_size_3d
+        # Patch sizes for depth/height/width; fall back to (2, patch_size, patch_size) if not set
+        patch_size_d, patch_size_h, patch_size_w = (
+            cfg.crops.patch_size_3d
+            if getattr(cfg.crops, "patch_size_3d", None) is not None
+            else (2, cfg.student.patch_size, cfg.student.patch_size)
+        )
+        D_p = D_size // patch_size_d
+        H_p = H_size // patch_size_h
+        W_p = W_size // patch_size_w
+        n_tokens = D_p * H_p * W_p
+        mask_generator = MaskingGenerator3D(
+            input_size=(D_p, H_p, W_p),
+            max_num_patches=int(0.5 * n_tokens),
+        )
+    else:
+        # Standard 2D image case
+        img_size = cfg.crops.global_crops_size
+        patch_size = int(cfg.student.patch_size * cfg.crops.teacher_to_student_resolution_scale)
+        n_tokens = (img_size // patch_size) ** 2
+        mask_generator = MaskingGenerator(
+            input_size=(img_size // patch_size, img_size // patch_size),
+            max_num_patches=0.5 * img_size // patch_size * img_size // patch_size,
+        )
 
     if cfg.multidistillation.enabled:
         assert cfg.multidistillation.global_batch_size % distributed.get_subgroup_size() == 0

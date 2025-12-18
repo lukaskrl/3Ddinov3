@@ -56,6 +56,9 @@ def build_model(args, only_teacher=False, img_size=224, device=None):
             untie_global_and_local_cls_norm=args.untie_global_and_local_cls_norm,
             device=device,
         )
+        # Optional depth patch size for 3D ViTs; ignored by 2D variants.
+        if hasattr(args, "patch_size_d"):
+            vit_kwargs["patch_size_d"] = args.patch_size_d
         teacher = vits.__dict__[args.arch](**vit_kwargs)
         teacher = init_fp8(teacher, args)
         if only_teacher:
