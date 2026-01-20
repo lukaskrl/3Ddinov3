@@ -136,7 +136,7 @@ optim:
   min_lr: 1.0e-06
   schedule_trunc_extra: 0.0  # Compute the schedule for (1 + schedule_trunc_extra) steps and truncate, .25 is a good choice
   clip_grad: 3.0
-  freeze_last_layer_epochs: 1
+  freeze_last_layer_epochs: 2
   scaling_rule: sqrt_wrt_1024
   patch_embed_lr_mult: 0.2
   dino_head_wd_multiplier: 1.0

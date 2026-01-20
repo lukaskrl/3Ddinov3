@@ -24,22 +24,23 @@ dino:
   center_momentum: 0.9
   # A tiny KoLeo weight helps avoid uniform-collapse in small-batch / low-diversity regimes.
   # Set back to 0.0 if you want to debug DINO in isolation.
-  koleo_loss_weight: 0.05
+  koleo_loss_weight: 0.1
   koleo_loss_distributed: false
   koleo_topk: 1
   koleo_distributed_replicas: 0
   koleo_distributed_loss_group_size: null
   koleo_distributed_loss_group_data: true
   force_weight_norm: false
-  reweight_dino_local_loss: false
+  # Warm up local-crop DINO term; helps early stability (local crops can be noisy/too hard).
+  reweight_dino_local_loss: true
   local_loss_weight_schedule:
-    start: 0.5
-    peak: 0.5
-    end: 0.5
-    warmup_epochs: 0
+    start: 0.0
+    peak: 1.0
+    end: 1.0
+    warmup_epochs: 10
 
 ibot:
-  loss_weight: 0.1  # Keep disabled for testing DINO loss in isolation
+  loss_weight: 1  # Keep disabled for testing DINO loss in isolation
   mask_sample_probability: 0.5
   mask_ratio_min_max:
     - 0.1
@@ -129,14 +130,15 @@ student:
   fp8_filter: "blocks"
 
 teacher:
-  # Faster/stronger teacher to avoid uniform collapse:
-  # - Start with lower momentum so the teacher tracks the student early
-  # - Sharper steady-state temp, short warmup
+  # Teacher schedule tuned to avoid "uniform teacher" collapse:
+  # - Keep teacher sharp (lower final temp)
+  # - Give it enough warmup epochs so assignments stabilize
+  # - End with higher EMA momentum for a smoother target later in training
   momentum_teacher: 0.99
-  final_momentum_teacher: 0.995
-  warmup_teacher_temp: 0.07
-  teacher_temp: 0.04
-  warmup_teacher_temp_epochs: 2
+  final_momentum_teacher: 1
+  warmup_teacher_temp: 0.04
+  teacher_temp: 0.07
+  warmup_teacher_temp_epochs: 10
   in_chans: 1
 
 distillation:
@@ -152,18 +154,18 @@ hrft:
   checkpoint_path: ""
 
 optim:
-  epochs: 1000                 # short run for testing
+  epochs: 5000                 # short run for testing
   optimizer: adamw
-  weight_decay: 0.00004
-  weight_decay_end: 0.00004
+  weight_decay: 0.04
+  weight_decay_end: 0.4
   lr: 0.0005                   # Increased LR to actually learn (was 0.0003)
   warmup_epochs: 5              # Reduced warmup so learning starts earlier (was 20)
   min_lr: 1.0e-06               # Lower than peak LR for proper decay
   schedule_trunc_extra: 0.0
   clip_grad: 3.0
   freeze_last_layer_epochs: 2
-  scaling_rule: null            # Disable LR downscaling; use full lr
-  patch_embed_lr_mult: 0.5
+  scaling_rule: sqrt_wrt_1024            # Disable LR downscaling; use full lr
+  patch_embed_lr_mult: 0.2
   dino_head_wd_multiplier: 1.0
   layerwise_decay: 0.9
   multi_tensor_optim: true
@@ -173,12 +175,12 @@ optim:
 
 crops:
   global_crops_scale:
-    - 0.30
+    - 0.5
     - 1.0
   local_crops_number: 4
   local_crops_scale:
-    - 0.10
-    - 0.30
+    - 0.20
+    - 0.50
   global_local_crop_pairs_ratios: 1.0
   localcrops_subset_of_globalcrops: false
   horizontal_flips: true
@@ -204,7 +206,7 @@ crops:
     - 16     # width
   ct_window:
     - -1000.0
-    - 3000.0
+    - 2000.0
   ct_mean: null
   ct_std: null
 
