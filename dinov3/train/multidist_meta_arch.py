@@ -147,10 +147,17 @@ class MultiDistillationMetaArch(SSLMetaArch):
         cls_after_head = self.teacher.dino_head(cls_after_head, only_last_layer=True)  # [n_crops * B, K]
         # End of multidistillation codepath
 
-        # Center with sinkhorn-knopp
-        cls_centered = self.dino_loss.sinkhorn_knopp_teacher(
-            cls_after_head, teacher_temp=teacher_temp
-        )  # [n_crops * B, K]
+        # Center teacher outputs using configured method
+        centering_method = getattr(self.cfg.train, "centering", "sinkhorn_knopp")
+        if centering_method == "softmax":
+            cls_centered = self.dino_loss.softmax_center_teacher(
+                cls_after_head, teacher_temp=teacher_temp, update_centers=True
+            )  # [n_crops * B, K]
+            self.dino_loss.update_center(cls_after_head)
+        else:  # sinkhorn_knopp
+            cls_centered = self.dino_loss.sinkhorn_knopp_teacher(
+                cls_after_head, teacher_temp=teacher_temp
+            )  # [n_crops * B, K]
         cls_centered = cls_centered.unflatten(0, (n_crops, B))  # [n_crops, B, K]
         masked_patch_centered = self.ibot_patch_loss.sinkhorn_knopp_teacher(
             masked_patch_after_head,

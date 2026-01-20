@@ -23,6 +23,7 @@ from dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
 from dinov3.train.param_groups import fuse_params_groups, get_params_groups_with_decay_fsdp
 from dinov3.utils import count_parameters
 
+
 logger = logging.getLogger("dinov3")
 
 
@@ -38,7 +39,7 @@ class SSLMetaArch(nn.Module):
         # assert cfg.multidistillation.enabled is False
         assert cfg.crops.local_crops_number > 0
         assert cfg.ibot.separate_head is True
-        assert cfg.train.centering == "sinkhorn_knopp"
+        # assert cfg.train.centering == "sinkhorn_knopp"
 
         # For some reason FULL_SHARD doesn't work
         assert cfg.compute_precision.sharding_strategy == "SHARD_GRAD_OP"
@@ -79,7 +80,13 @@ class SSLMetaArch(nn.Module):
         )
         student_model_dict["dino_head"] = dino_head_class()
         teacher_model_dict["dino_head"] = dino_head_class()
-        self.dino_loss = DINOLoss(self.dino_out_dim)
+        
+        # Configure DINO loss hyperparameters
+        student_temp = getattr(cfg.dino, "student_temp", 0.1)
+        center_momentum = getattr(cfg.dino, "center_momentum", 0.9)
+        logger.info(f"OPTIONS -- DINO -- student_temp: {student_temp}")
+        logger.info(f"OPTIONS -- DINO -- center_momentum: {center_momentum}")
+        self.dino_loss = DINOLoss(self.dino_out_dim, student_temp=student_temp, center_momentum=center_momentum)
 
         logger.info("OPTIONS -- KOLEO")
         logger.info(f"OPTIONS -- KOLEO -- loss_weight: {cfg.dino.koleo_loss_weight}")
@@ -245,16 +252,30 @@ class SSLMetaArch(nn.Module):
             logger.info(f"OPTIONS -- GRAM -- remove_neg: {cfg.gram.remove_neg}")
             logger.info(f"OPTIONS -- GRAM -- remove_only_teacher_neg: {cfg.gram.remove_only_teacher_neg}")
 
-            if cfg.crops.gram_teacher_crops_size is None and self.has_gram_teacher:
-                raise ValueError("cfg.crops.gram_teacher_crops_size must be set to use gram loss")
-            if cfg.crops.gram_teacher_crops_size is not None and self.gram_ema_teacher:
-                raise ValueError("cfg.crops.gram_teacher_crops_size shoud be None when gram.ema_teacher=True")
-
-            self.student_crop_size = cfg.crops.global_crops_size
+            # Check gram teacher crop size configuration
+            use_3d = getattr(cfg.crops, "use_3d_augmentation", False)
+            if use_3d:
+                # 3D case: check gram_teacher_crops_size_3d
+                if cfg.crops.gram_teacher_crops_size_3d is None and self.has_gram_teacher:
+                    raise ValueError("cfg.crops.gram_teacher_crops_size_3d must be set to use gram loss with 3D data")
+                if cfg.crops.gram_teacher_crops_size_3d is not None and self.gram_ema_teacher:
+                    raise ValueError("cfg.crops.gram_teacher_crops_size_3d should be None when gram.ema_teacher=True")
+                self.student_crop_size_3d = tuple(cfg.crops.global_crops_size_3d)
+                logger.info(f"OPTIONS -- global crops student/teacher size (3D): {self.student_crop_size_3d}")
+                logger.info(f"OPTIONS -- global crops GRAM teacher size (3D): {cfg.crops.gram_teacher_crops_size_3d}")
+            else:
+                # 2D case: check gram_teacher_crops_size
+                if cfg.crops.gram_teacher_crops_size is None and self.has_gram_teacher:
+                    raise ValueError("cfg.crops.gram_teacher_crops_size must be set to use gram loss")
+                if cfg.crops.gram_teacher_crops_size is not None and self.gram_ema_teacher:
+                    raise ValueError("cfg.crops.gram_teacher_crops_size should be None when gram.ema_teacher=True")
+                self.student_crop_size = cfg.crops.global_crops_size
+            
             self.gram_global_teacher_resize_method = cfg.gram.global_teacher_resize_method
             self.gram_global_teacher_resize_antialias = cfg.gram.global_teacher_resize_antialias
-            logger.info(f"OPTIONS -- global crops student/teacher size: {self.student_crop_size}")
-            logger.info(f"OPTIONS -- global crops GRAM teacher size: {cfg.crops.gram_teacher_crops_size}")
+            if not use_3d:
+                logger.info(f"OPTIONS -- global crops student/teacher size: {self.student_crop_size}")
+                logger.info(f"OPTIONS -- global crops GRAM teacher size: {cfg.crops.gram_teacher_crops_size}")
             logger.info(f"OPTIONS -- global crops GRAM teacher resize method: {cfg.gram.global_teacher_resize_method}")
             logger.info(
                 f"OPTIONS -- global crops GRAM teacher resize antialias: {cfg.gram.global_teacher_resize_antialias}"
@@ -401,12 +422,19 @@ class SSLMetaArch(nn.Module):
 
         # Gram output
         if self.gram_use_loss:
+            # For 3D, pass full shape; for 2D, pass just the spatial dimension
+            use_3d = getattr(self.cfg.crops, "use_3d_augmentation", False)
+            if use_3d and global_crops.ndim == 5:  # (B*n_crops, C, D, H, W)
+                student_global_crops_shape = tuple(global_crops.shape[-3:])  # (D, H, W)
+            else:
+                # 2D case: (B*n_crops, C, H, W) -> extract H or W (they should be equal)
+                student_global_crops_shape = global_crops.shape[-1]  # H or W for 2D
             gram_global = self.get_gram_teacher_output(
                 gram_teacher_crops.unflatten(0, (n_global_crops, B)) if gram_teacher_crops is not None else None,
                 masks=masks,
                 teacher_global=teacher_global,
                 student_global=student_global,
-                student_global_crops_size=global_crops.shape[-1],
+                student_global_crops_shape=student_global_crops_shape,
             )
         else:
             gram_global = {}
@@ -423,7 +451,79 @@ class SSLMetaArch(nn.Module):
             iteration=iteration,
         )
 
+        # Check loss value and student outputs before backprop
+        with torch.no_grad():
+            metrics_dict["loss_value"] = loss_accumulator.item() if isinstance(loss_accumulator, torch.Tensor) else float(loss_accumulator)
+            if isinstance(loss_accumulator, torch.Tensor):
+                metrics_dict["loss_is_nan"] = float(torch.isnan(loss_accumulator).item())
+                metrics_dict["loss_is_inf"] = float(torch.isinf(loss_accumulator).item())
+                metrics_dict["loss_is_zero"] = float((loss_accumulator.abs() < 1e-8).item())
+            
+            # Check if student outputs require grad (they should!)
+            student_cls_requires_grad = student_global["cls_after_head"].requires_grad
+            metrics_dict["student_cls_requires_grad"] = float(student_cls_requires_grad)
+            
+            # Check if loss is connected to student outputs
+            if isinstance(loss_accumulator, torch.Tensor) and student_cls_requires_grad:
+                # Try to compute a dummy gradient to see if graph is connected
+                try:
+                    dummy_grad = torch.autograd.grad(
+                        outputs=loss_accumulator,
+                        inputs=student_global["cls_after_head"],
+                        retain_graph=True,
+                        create_graph=False,
+                        only_inputs=True
+                    )
+                    if dummy_grad[0] is not None:
+                        metrics_dict["loss_to_student_grad_norm"] = dummy_grad[0].norm().item()
+                    else:
+                        metrics_dict["loss_to_student_grad_norm"] = 0.0
+                except Exception as e:
+                    metrics_dict["loss_to_student_grad_norm"] = -1.0  # Error computing grad
+        
         self.backprop_loss(loss_accumulator)
+        
+        # Add gradient diagnostics AFTER backprop (before clipping)
+        # Note: With FSDP, we need to check if params have gradients
+        with torch.no_grad():
+            # Check backbone gradients after backprop
+            backbone_grad_norm_after = 0.0
+            backbone_has_grad = False
+            try:
+                # Try to get parameters - with FSDP this might be tricky
+                if hasattr(self.student.backbone, 'parameters'):
+                    backbone_params = list(self.student.backbone.parameters())
+                    if len(backbone_params) > 0:
+                        # Check first few parameters
+                        for p in backbone_params[:10]:
+                            if p.grad is not None:
+                                backbone_has_grad = True
+                                backbone_grad_norm_after += p.grad.norm().item()
+                        if backbone_has_grad:
+                            backbone_grad_norm_after = backbone_grad_norm_after / min(10, len(backbone_params))
+            except Exception:
+                pass  # FSDP might make this tricky
+            
+            # Check head gradients after backprop
+            head_grad_norm_after = 0.0
+            head_has_grad = False
+            try:
+                if hasattr(self.student.dino_head, 'parameters'):
+                    head_params = list(self.student.dino_head.parameters())
+                    if len(head_params) > 0:
+                        for p in head_params[:10]:
+                            if p.grad is not None:
+                                head_has_grad = True
+                                head_grad_norm_after += p.grad.norm().item()
+                        if head_has_grad:
+                            head_grad_norm_after = head_grad_norm_after / min(10, len(head_params))
+            except Exception:
+                pass
+            
+            metrics_dict["backbone_grad_norm_after_bp"] = backbone_grad_norm_after
+            metrics_dict["backbone_has_grad"] = float(backbone_has_grad)
+            metrics_dict["head_grad_norm_after_bp"] = head_grad_norm_after
+            metrics_dict["head_has_grad"] = float(head_has_grad)
 
         # Return total weighted loss and a dict of metrics to log
         return loss_accumulator, metrics_dict | loss_dict
@@ -459,10 +559,20 @@ class SSLMetaArch(nn.Module):
         # DINO head on CLS tokens
         cls_after_head = self.teacher.dino_head(cls)  # [n_crops * B, K]
 
-        # Center with sinkhorn-knopp
-        cls_centered = self.dino_loss.sinkhorn_knopp_teacher(
-            cls_after_head, teacher_temp=teacher_temp
-        )  # [n_crops * B, K]
+        # Center teacher outputs using configured method
+        centering_method = getattr(self.cfg.train, "centering", "sinkhorn_knopp")
+        if centering_method == "softmax":
+            # Flow: apply_center_update() uses PREVIOUS batch's stored center, then we store CURRENT batch for next iteration
+            # Iteration N: apply center from batch N-1, then store center from batch N
+            cls_centered = self.dino_loss.softmax_center_teacher(
+                cls_after_head, teacher_temp=teacher_temp, update_centers=True
+            )  # [n_crops * B, K]
+            # Store current batch's center for the NEXT iteration
+            self.dino_loss.update_center(cls_after_head)
+        else:  # sinkhorn_knopp
+            cls_centered = self.dino_loss.sinkhorn_knopp_teacher(
+                cls_after_head, teacher_temp=teacher_temp
+            )  # [n_crops * B, K]
         cls_centered = cls_centered.unflatten(0, (n_crops, B))  # [n_crops, B, K]
         masked_patch_centered = self.ibot_patch_loss.sinkhorn_knopp_teacher(
             masked_patch_after_head,
@@ -479,7 +589,7 @@ class SSLMetaArch(nn.Module):
             "masked_patch_centered": masked_patch_centered,  # [n_masked_patches, K]
         }
 
-    def get_gram_teacher_output(self, images, *, masks, teacher_global, student_global, student_global_crops_size):
+    def get_gram_teacher_output(self, images, *, masks, teacher_global, student_global, student_global_crops_shape):
         # Get student patch features
         student_patches = student_global["patch_pre_head"].flatten(0, 1)  # [n_crops * B, P, D]
 
@@ -489,31 +599,145 @@ class SSLMetaArch(nn.Module):
         else:
             if not self.gram_teacher_initialized:
                 raise ValueError("Gram teacher has not been initialized. Load a checkpoint or from the EMA teacher.")
-            n_crops, B, rgb, H, W = images.shape
-            images = images.flatten(0, 1)  # [n_crops * B, rgb, H, W]
+            
+            # Detect 3D vs 2D based on input shape
+            use_3d = getattr(self.cfg.crops, "use_3d_augmentation", False)
+            if images is not None:
+                is_3d_input = images.ndim == 6  # (n_crops, B, C, D, H, W) for 3D
+            else:
+                # Fallback: check config (should not happen when gram_ema_teacher=False, but handle gracefully)
+                is_3d_input = use_3d
+                if is_3d_input:
+                    raise ValueError("Cannot determine 3D input shape: images is None but use_3d_augmentation is True")
+            
+            if is_3d_input:
+                # 3D volumetric case
+                if images is None:
+                    raise ValueError("images cannot be None for 3D gram teacher processing")
+                n_crops, B, rgb, D, H, W = images.shape
+                images = images.flatten(0, 1)  # [n_crops * B, rgb, D, H, W]
 
-            with torch.no_grad():
-                backbone_out = self.gram_teacher.backbone(images, is_training=True)
-            teacher_patches = backbone_out["x_norm_patchtokens"]  # [n_crops * B, P_T, D]
+                with torch.no_grad():
+                    backbone_out = self.gram_teacher.backbone(images, is_training=True)
+                teacher_patches = backbone_out["x_norm_patchtokens"]  # [n_crops * B, P_T, D]
 
-            # Downsample Gram teacher features if needed
-            if teacher_patches.shape[1] != student_patches.shape[1]:
-                N = H // self.cfg.student.patch_size
-                assert teacher_patches.shape[1] == N**2
-                N_student = student_global_crops_size // self.cfg.student.patch_size
-                assert student_patches.shape[1] == N_student**2
-                patches_hw = teacher_patches.transpose(-2, -1).unflatten(-1, (N, N))  # [n_crops * B, D, N, N]
-                patches_hw = torch.nn.functional.interpolate(
-                    patches_hw,
-                    size=(N_student, N_student),
-                    mode=self.gram_global_teacher_resize_method,
-                    align_corners=False,
-                    antialias=self.gram_global_teacher_resize_antialias,
-                )
-                teacher_patches = patches_hw.flatten(-2, -1).transpose(
-                    -2, -1
-                )  # [n_crops * B, N_student * N_student, D]
-                assert teacher_patches.shape == student_patches.shape
+                # Downsample Gram teacher features if needed (3D case)
+                if teacher_patches.shape[1] != student_patches.shape[1]:
+                    # Get patch sizes from config
+                    patch_size_d = getattr(self.cfg.student, "patch_size_d", 2)
+                    patch_size_hw = self.cfg.student.patch_size
+                    
+                    # Compute patch grid dimensions for gram teacher
+                    D_p_teacher = D // patch_size_d
+                    H_p_teacher = H // patch_size_hw
+                    W_p_teacher = W // patch_size_hw
+                    P_teacher = D_p_teacher * H_p_teacher * W_p_teacher
+                    
+                    # Compute patch grid dimensions for student
+                    if isinstance(student_global_crops_shape, (tuple, list)) and len(student_global_crops_shape) == 3:
+                        D_student, H_student, W_student = student_global_crops_shape
+                    else:
+                        # Fallback: try to infer from student patches
+                        # This shouldn't happen in normal flow, but handle gracefully
+                        raise ValueError(f"Expected 3D crop shape (D, H, W) for student, got {student_global_crops_shape}")
+                    
+                    D_p_student = D_student // patch_size_d
+                    H_p_student = H_student // patch_size_hw
+                    W_p_student = W_student // patch_size_hw
+                    P_student = D_p_student * H_p_student * W_p_student
+                    
+                    assert teacher_patches.shape[1] == P_teacher, (
+                        f"Expected {P_teacher} patches from gram teacher, got {teacher_patches.shape[1]}"
+                    )
+                    assert student_patches.shape[1] == P_student, (
+                        f"Expected {P_student} patches from student, got {student_patches.shape[1]}"
+                    )
+                    
+                    # Reshape teacher patches to 3D grid: [n_crops * B, D_p, H_p, W_p, D]
+                    teacher_patches_3d = teacher_patches.view(
+                        n_crops * B, D_p_teacher, H_p_teacher, W_p_teacher, -1
+                    )
+                    batch_dim = n_crops * B
+                    feat_dim = teacher_patches_3d.shape[-1]
+                    
+                    # Permute to [n_crops * B, D, D_p, H_p, W_p] for interpolation
+                    teacher_patches_3d = teacher_patches_3d.permute(0, 4, 1, 2, 3)  # [n_crops * B, D, D_p, H_p, W_p]
+                    
+                    # Step 1: Interpolate along height and width (H_p, W_p) for each (D, D_p) slice
+                    if H_p_teacher != H_p_student or W_p_teacher != W_p_student:
+                        # Reshape to [n_crops * B * D * D_p, 1, H_p, W_p] for 2D interpolation
+                        teacher_patches_3d = teacher_patches_3d.reshape(
+                            batch_dim * feat_dim * D_p_teacher, 1, H_p_teacher, W_p_teacher
+                        )
+                        teacher_patches_3d = torch.nn.functional.interpolate(
+                            teacher_patches_3d,
+                            size=(H_p_student, W_p_student),
+                            mode=self.gram_global_teacher_resize_method,
+                            align_corners=False,
+                            antialias=self.gram_global_teacher_resize_antialias,
+                        )
+                        teacher_patches_3d = teacher_patches_3d.squeeze(1)  # [B*D*D_p, H_p_student, W_p_student]
+                        teacher_patches_3d = teacher_patches_3d.view(
+                            batch_dim, feat_dim, D_p_teacher, H_p_student, W_p_student
+                        )
+                    
+                    # Step 2: Interpolate along depth dimension (D_p) if needed
+                    if D_p_teacher != D_p_student:
+                        # Reshape to [n_crops * B * D * H_p * W_p, D_p] then add channel dim for interpolation
+                        # Current shape: [batch_dim, feat_dim, D_p_teacher, H_p_student, W_p_student]
+                        teacher_patches_3d = teacher_patches_3d.permute(0, 1, 3, 4, 2)  # [batch_dim, feat_dim, H_p, W_p, D_p]
+                        teacher_patches_3d = teacher_patches_3d.reshape(
+                            batch_dim * feat_dim * H_p_student * W_p_student, D_p_teacher
+                        )
+                        # Add channel and spatial dims for interpolation: [B*D*H*W, 1, 1, D_p]
+                        teacher_patches_3d = teacher_patches_3d.unsqueeze(1).unsqueeze(2)  # [B*D*H*W, 1, 1, D_p]
+                        teacher_patches_3d = torch.nn.functional.interpolate(
+                            teacher_patches_3d,
+                            size=(1, D_p_student),
+                            mode="bilinear",
+                            align_corners=False,
+                        )
+                        teacher_patches_3d = teacher_patches_3d.squeeze(1).squeeze(1)  # [B*D*H*W, D_p_student]
+                        teacher_patches_3d = teacher_patches_3d.view(
+                            batch_dim, feat_dim, H_p_student, W_p_student, D_p_student
+                        )
+                        teacher_patches_3d = teacher_patches_3d.permute(0, 1, 4, 2, 3)  # [batch_dim, feat_dim, D_p_student, H_p, W_p]
+                    
+                    # Reshape back to [n_crops * B, D_p*H_p*W_p, D]
+                    teacher_patches = teacher_patches_3d.permute(0, 2, 3, 4, 1)  # [n_crops * B, D_p, H_p, W_p, D]
+                    teacher_patches = teacher_patches.reshape(n_crops * B, D_p_student * H_p_student * W_p_student, -1)
+                    
+                    # Final check
+                    assert teacher_patches.shape[1] == P_student, (
+                        f"After resizing, expected {P_student} patches, got {teacher_patches.shape[1]}"
+                    )
+            else:
+                # 2D image case (original logic)
+                n_crops, B, rgb, H, W = images.shape
+                images = images.flatten(0, 1)  # [n_crops * B, rgb, H, W]
+
+                with torch.no_grad():
+                    backbone_out = self.gram_teacher.backbone(images, is_training=True)
+                teacher_patches = backbone_out["x_norm_patchtokens"]  # [n_crops * B, P_T, D]
+
+                # Downsample Gram teacher features if needed
+                if teacher_patches.shape[1] != student_patches.shape[1]:
+                    N = H // self.cfg.student.patch_size
+                    assert teacher_patches.shape[1] == N**2
+                    N_student = student_global_crops_shape // self.cfg.student.patch_size
+                    assert student_patches.shape[1] == N_student**2
+                    patches_hw = teacher_patches.transpose(-2, -1).unflatten(-1, (N, N))  # [n_crops * B, D, N, N]
+                    patches_hw = torch.nn.functional.interpolate(
+                        patches_hw,
+                        size=(N_student, N_student),
+                        mode=self.gram_global_teacher_resize_method,
+                        align_corners=False,
+                        antialias=self.gram_global_teacher_resize_antialias,
+                    )
+                    teacher_patches = patches_hw.flatten(-2, -1).transpose(
+                        -2, -1
+                    )  # [n_crops * B, N_student * N_student, D]
+                    assert teacher_patches.shape == student_patches.shape
 
         # Select the patches to be considered in the loss
         orig_student_patches = student_patches
@@ -643,6 +867,75 @@ class SSLMetaArch(nn.Module):
             ignore_diagonal=self.dino_global_ignore_diagonal,
         )
         loss_dict["dino_global_crops_loss"] = dino_global_crops_loss
+        
+        # Comprehensive diagnostics to verify loss computation
+        with torch.no_grad():
+            teacher_probs_flat = teacher_global["cls_centered"].flatten(0, 1)  # [n_crops * B, K]
+            student_logits_flat = student_global["cls_after_head"].flatten(0, 1)  # [n_crops * B, K]
+            
+            # CRITICAL: Check teacher outputs BEFORE centering (if available)
+            if "cls_after_head" in teacher_global:
+                teacher_logits_before_centering = teacher_global["cls_after_head"].flatten(0, 1)  # [n_crops * B, K]
+                teacher_logits_std = teacher_logits_before_centering.std(dim=-1).mean()  # Should be > 0 if not uniform
+                teacher_logits_max = teacher_logits_before_centering.max(dim=-1)[0].mean()
+                teacher_logits_min = teacher_logits_before_centering.min(dim=-1)[0].mean()
+                teacher_logits_range = teacher_logits_max - teacher_logits_min
+                loss_dict["dino_teacher_logits_std"] = teacher_logits_std  # If ~0, outputs are uniform
+                loss_dict["dino_teacher_logits_range"] = teacher_logits_range  # If ~0, outputs are uniform
+                loss_dict["dino_teacher_logits_max"] = teacher_logits_max
+                loss_dict["dino_teacher_logits_min"] = teacher_logits_min
+                
+                # Check if teacher outputs are uniform BEFORE centering
+                teacher_logits_softmax_before = nn.functional.softmax(teacher_logits_before_centering, dim=-1)
+                teacher_entropy_before = -(teacher_logits_softmax_before.clamp_min(1e-8) * teacher_logits_softmax_before.clamp_min(1e-8).log()).sum(dim=-1).mean()
+                K = teacher_logits_before_centering.shape[-1]
+                uniform_entropy = float(torch.log(torch.tensor(K, dtype=teacher_entropy_before.dtype, device=teacher_entropy_before.device)))
+                loss_dict["dino_teacher_entropy_before_centering"] = teacher_entropy_before
+                loss_dict["dino_teacher_entropy_before_vs_uniform"] = teacher_entropy_before / uniform_entropy
+            
+            # Verify teacher probs sum to 1
+            teacher_probs_sum = teacher_probs_flat.sum(dim=-1)
+            loss_dict["dino_teacher_probs_sum"] = teacher_probs_sum.mean()  # Should be ~1.0
+            loss_dict["dino_teacher_probs_sum_std"] = teacher_probs_sum.std()
+            
+            # Teacher entropy (if uniform, entropy = ln(K))
+            teacher_probs_flat_clamped = teacher_probs_flat.clamp_min(1e-8)
+            teacher_entropy = -(teacher_probs_flat_clamped * teacher_probs_flat_clamped.log()).sum(dim=-1).mean()
+            K = teacher_probs_flat.shape[-1]
+            uniform_entropy = float(torch.log(torch.tensor(K, dtype=teacher_entropy.dtype, device=teacher_entropy.device)))
+            loss_dict["dino_teacher_entropy"] = teacher_entropy
+            loss_dict["dino_teacher_entropy_vs_uniform"] = teacher_entropy / uniform_entropy  # 1.0 = uniform, <1.0 = learning
+            
+            # Student entropy (should be lower than teacher initially)
+            student_probs_flat = nn.functional.softmax(student_logits_flat / self.dino_loss.student_temp, dim=-1)
+            student_probs_flat_clamped = student_probs_flat.clamp_min(1e-8)
+            student_entropy = -(student_probs_flat_clamped * student_probs_flat_clamped.log()).sum(dim=-1).mean()
+            loss_dict["dino_student_entropy"] = student_entropy
+            loss_dict["dino_student_entropy_vs_uniform"] = student_entropy / uniform_entropy
+            
+            # Max probability (if uniform, max_prob ≈ 1/K)
+            teacher_max_prob = teacher_probs_flat.max(dim=-1)[0].mean()
+            student_max_prob = student_probs_flat.max(dim=-1)[0].mean()
+            loss_dict["dino_teacher_max_prob"] = teacher_max_prob
+            loss_dict["dino_student_max_prob"] = student_max_prob
+            loss_dict["dino_teacher_max_prob_vs_uniform"] = teacher_max_prob / (1.0 / K)  # >1.0 = peaked, 1.0 = uniform
+            
+            # Center statistics (for softmax centering)
+            center_norm = self.dino_loss.center.norm().item()
+            loss_dict["dino_center_norm"] = center_norm
+            
+            # Teacher probs difference between crops (if identical, model isn't learning crop-specific features)
+            if n_global_crops >= 2:
+                crop0_probs = teacher_global["cls_centered"][0]  # [B, K]
+                crop1_probs = teacher_global["cls_centered"][1]  # [B, K]
+                crop_diff = (crop0_probs - crop1_probs).abs().mean()
+                loss_dict["dino_teacher_crop_diff"] = crop_diff  # 0.0 = identical crops (bad), >0 = learning differences
+                
+                # Cross-entropy between crops (should decrease as model learns)
+                crop0_log_probs = crop0_probs.clamp_min(1e-8).log()
+                crop_cross_entropy = -(crop0_probs * crop1_probs.clamp_min(1e-8).log()).sum(dim=-1).mean()
+                loss_dict["dino_teacher_crop_cross_entropy"] = crop_cross_entropy
+        
         loss_accumulator += self.dino_loss_weight * dino_global_scale * dino_global_crops_loss
 
         # Koleo: regularize pre-head CLS tokens of student(global crops)

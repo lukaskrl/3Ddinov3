@@ -9,16 +9,18 @@ compute_precision:
   reduce_dtype: fp32
   sharding_strategy: SHARD_GRAD_OP
 
-# Goal: "Does DINO loss work at all?" -> get off ln(K) quickly and smoothly.
+# MINIMAL OVERFITTING CONFIG: If DINO can't overfit this, there's a fundamental bug.
+# Goal: Overfit a single batch in < 100 iterations
+# AGGRESSIVE SETTINGS FOR FORCING LEARNING ON ONE IMAGE
 dino:
   loss_weight: 1.0
   global_ignore_diagonal: true
-  head_n_prototypes: 32          # smaller K = easier to leave uniform with small batch
+  head_n_prototypes: 64           # Increased from 32 - more prototypes = harder to collapse to uniform
   head_bottleneck_dim: 256
   head_norm_last_layer: true
   head_nlayers: 3
   head_hidden_dim: 2048
-  koleo_loss_weight: 0.0
+  koleo_loss_weight: 0.0          # Disable all auxiliary losses
   force_weight_norm: false
   reweight_dino_local_loss: false
   local_loss_weight_schedule:
@@ -26,9 +28,11 @@ dino:
     peak: 0.5
     end: 0.5
     warmup_epochs: 0
+  student_temp: 0.1               # Higher than teacher for better gradient flow
+  center_momentum: 0.99           # VERY HIGH - center should adapt VERY slowly (0.9 was still too fast)
 
 ibot:
-  loss_weight: 0
+  loss_weight: 0                  # Disable IBOT completely
   mask_sample_probability: 0.5
   mask_ratio_min_max: [0.1, 0.5]
   mask_random_circular_shift: false
@@ -41,7 +45,7 @@ ibot:
   head_hidden_dim: 2048
 
 gram:
-  use_loss: false
+  use_loss: false                 # Disable Gram
   compute_stats: false
   loss_weight: 1.0
   ema_teacher: true
@@ -61,32 +65,32 @@ gram:
   loss_weight_schedule: null
 
 train:
-  batch_size_per_gpu: 4
-  dataset_path: CTVolume:root=/home/lukas/data/ARTILLERY/images_binary
+  batch_size_per_gpu: 1          # Single sample = easiest to overfit
+  dataset_path: CTVolume:root=/home/lukas/data/ARTILLERY/images_overfit
   data_config: null
-  output_dir: ./work_dir/dino_sanity
-  saveckp_freq: 20
+  output_dir: ./work_dir/dino_overfit
+  saveckp_freq: 50
   seed: 0
-  num_workers: 4
-  OFFICIAL_EPOCH_LENGTH: 60       # keep standard so warmup math is obvious
+  num_workers: 0                 # Single-threaded for reproducibility
+  OFFICIAL_EPOCH_LENGTH: 1       # 1 sample = 1 epoch, so we see same sample repeatedly
   monitor_gradient_norm: false
   chunk_schedule: []
   use_teacher_head: true
   learn_from_teacher_tokens: false
-  centering: "softmax"
+  centering: "softmax"    # Try softmax - Sinkhorn-Knopp forces uniform distribution by design
   checkpointing: false
   checkpointing_full: false
-  compile: false                  # easier debugging / less variability
+  compile: false                  # Deterministic
   cudagraphs: false
   sharded_eval_checkpoint: false
-  cache_dataset: false
+  cache_dataset: true             # Cache single sample
 
 student:
   arch: vit3d_base
   patch_size: 16
   patch_size_d: 2
-  drop_path_rate: 0.0             # remove stochastic depth for a clean sanity check
-  layerscale: null
+  drop_path_rate: 0.0             # NO stochastic depth
+  layerscale: null                # Train from scratch
   pretrained_weights: ""
   ffn_layer: "mlp"
   ffn_ratio: 4.0
@@ -113,11 +117,11 @@ student:
   fp8_filter: "blocks"
 
 teacher:
-  momentum_teacher: 0.99          # EMA teacher but more responsive than 0.996
+  momentum_teacher: 0.996          # HIGH - teacher should update slowly to prevent collapse
   final_momentum_teacher: 1.0
-  warmup_teacher_temp: 0.07
-  teacher_temp: 0.04              # moderate sharpness (avoid batch overfit / spikes)
-  warmup_teacher_temp_epochs: 0
+  warmup_teacher_temp: 0.07        # Start less sharp (0.04 was too sharp, causing collapse)
+  teacher_temp: 0.07               # Moderate sharpness - not too sharp to avoid collapse
+  warmup_teacher_temp_epochs: 20   # Longer warmup to stabilize
   in_chans: 1
 
 distillation:
@@ -133,37 +137,37 @@ hrft:
   checkpoint_path: ""
 
 optim:
-  epochs: 10000
+  epochs: 1000                     # Short run
   optimizer: adamw
-  weight_decay: 0.00004
-  weight_decay_end: 0.00004
-  lr: 0.0005
-  warmup_epochs: 0               # ensure it starts learning immediately
-  min_lr: 1.0e-06
+  weight_decay: 0.0               # NO weight decay = easier overfitting
+  weight_decay_end: 0.0
+  lr: 0.001                       # Higher LR - need stronger signal to prevent collapse
+  warmup_epochs: 20               # Longer warmup to stabilize early training
+  min_lr: 0.0005                  # Constant LR (no decay)
   schedule_trunc_extra: 0.0
-  clip_grad: 3.0
-  freeze_last_layer_epochs: 0
-  scaling_rule: null
-  patch_embed_lr_mult: 0.2
+  clip_grad: 3.0                  # Moderate clip
+  freeze_last_layer_epochs: 0     # Head trains immediately
+  scaling_rule: null               # No LR scaling
+  patch_embed_lr_mult: 1.0       # Same LR for all layers
   dino_head_wd_multiplier: 1.0
-  layerwise_decay: 0.9
+  layerwise_decay: 1.0             # No layerwise decay
   multi_tensor_optim: true
   dump_fsdp_weights_path: ""
   adamw_beta1: 0.9
   adamw_beta2: 0.999
 
 crops:
-  global_crops_scale: [0.30, 1.0]
-  local_crops_number: 4
-  local_crops_scale: [0.10, 0.30]
+  global_crops_scale: [0.8, 1.0]  # Less variation = easier to overfit
+  local_crops_number: 2           # Fewer local crops = simpler
+  local_crops_scale: [0.5, 0.8]
   global_local_crop_pairs_ratios: 1.0
   localcrops_subset_of_globalcrops: false
-  horizontal_flips: true
+  horizontal_flips: false         # NO flips = deterministic crops (easier to overfit)
   gram_teacher_no_distortions: false
 
   use_3d_augmentation: true
-  global_crops_size_3d: [192, 192, 192]
-  local_crops_size_3d: [96, 96, 96]
+  global_crops_size_3d: [128, 128, 128]  # Smaller = faster
+  local_crops_size_3d: [64, 64, 64]
   gram_teacher_crops_size_3d: null
   patch_size_3d: [2, 16, 16]
   ct_window: [-1000.0, 3000.0]

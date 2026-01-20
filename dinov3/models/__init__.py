@@ -99,11 +99,16 @@ def build_model_from_cfg(cfg, only_teacher: bool = False):
         # Fallback default
         img_size = 224
 
+    # By default we construct models on the meta device to enable FSDP-style
+    # initialization with minimal memory. For lightweight debugging / scripts,
+    # this can be disabled by setting cfg.debug_no_meta = True.
+    device = None if getattr(cfg, "debug_no_meta", False) else "meta"
+
     outputs = build_model(
         cfg.student,
         only_teacher=only_teacher,
         img_size=img_size,
-        device="meta",
+        device=device,
     )
     if only_teacher:
         teacher, embed_dim = outputs

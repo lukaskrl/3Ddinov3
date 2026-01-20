@@ -36,7 +36,13 @@ class DINOHead(nn.Module):
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=0.02)
+            # Use MUCH larger std for last layer to get more variance in logits
+            # This is critical when inputs are normalized (unit norm)
+            # With temp=0.07, need std/temp > 3-5, so std > 0.21-0.35
+            if hasattr(self, 'last_layer') and m is self.last_layer:
+                trunc_normal_(m.weight, std=0.3)  # 15x larger - needed for Sinkhorn-Knopp to preserve structure
+            else:
+                trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 

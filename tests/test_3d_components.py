@@ -1,3 +1,4 @@
+#%%
 import numpy as np
 import torch
 import os, sys
@@ -59,6 +60,42 @@ def test_3d_augmentation_output_shapes_and_finiteness():
         assert torch.isfinite(l).all()
 
 
+def test_3d_crops_are_distinct_and_randomized():
+    """
+    Check that 3D global/local crops are not trivially identical copies and
+    that local crops differ from global crops.
+    """
+    vol = torch.randn(1, 96, 96, 96)
+
+    aug = DataAugmentationDINO3D(
+        global_crops_scale=(0.5, 1.0),
+        local_crops_scale=(0.1, 0.5),
+        local_crops_number=4,
+        global_crops_size_3d=(64, 64, 64),
+        local_crops_size_3d=(32, 32, 32),
+        gram_teacher_crops_size_3d=None,
+        gram_teacher_no_distortions=False,
+        local_crops_subset_of_global_crops=False,
+        patch_size_3d=(2, 16, 16),
+        horizontal_flips=True,
+        ct_window=(-1000.0, 4000.0),
+        mean=None,
+        std=None,
+    )
+
+    out = aug(vol)
+    g1, g2 = out["global_crops"]
+    locals_ = out["local_crops"]
+
+    # Global crops should differ from each other with very high probability
+    assert not torch.allclose(g1, g2), "3D global crops appear to be identical"
+
+    # Each local crop should differ from both global crops
+    for lc in locals_:
+        assert not torch.allclose(lc, g1), "Local crop equals first global crop"
+        assert not torch.allclose(lc, g2), "Local crop equals second global crop"
+
+
 def test_masking_generator_3d_shapes_and_counts():
     D_p, H_p, W_p = 4, 8, 8
     N = D_p * H_p * W_p
@@ -100,3 +137,13 @@ def test_dinovisiontransformer3d_forward_no_nans():
         tensor = out[key]
         assert isinstance(tensor, torch.Tensor)
         assert torch.isfinite(tensor).all()
+
+
+
+#%%
+#%% Test all functions
+test_3d_augmentation_output_shapes_and_finiteness()
+test_3d_crops_are_distinct_and_randomized()
+test_masking_generator_3d_shapes_and_counts()
+test_dinovisiontransformer3d_forward_no_nans()
+#%%

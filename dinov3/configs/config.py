@@ -70,7 +70,7 @@ def get_default_config() -> DictConfig:
 
 def get_cfg_from_args(args: DinoV3SetupArgs, multidistillation=False, strict=True):
     overrides = [*args.opts]
-    if args.output_dir is not None:
+    if args.output_dir is not None and args.output_dir != "":
         overrides.append(f"train.output_dir={os.path.realpath(args.output_dir)}")
 
     # Config file

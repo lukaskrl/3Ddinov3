@@ -12,12 +12,19 @@ compute_precision:
 dino:
   loss_weight: 1.0
   global_ignore_diagonal: true
-  head_n_prototypes: 65536
+  head_n_prototypes: 1024
   head_bottleneck_dim: 256
-  head_norm_last_layer: false
+  head_norm_last_layer: true
   head_nlayers: 3
   head_hidden_dim: 2048
-  koleo_loss_weight: 0.1
+  # DINO collapse-avoidance knobs
+  # - student_temp: keep reasonably low so student distributions aren't too flat
+  # - center_momentum: lower -> center adapts faster; helps avoid "stale center" issues early on
+  student_temp: 0.1
+  center_momentum: 0.9
+  # A tiny KoLeo weight helps avoid uniform-collapse in small-batch / low-diversity regimes.
+  # Set back to 0.0 if you want to debug DINO in isolation.
+  koleo_loss_weight: 0.05
   koleo_loss_distributed: false
   koleo_topk: 1
   koleo_distributed_replicas: 0
@@ -32,7 +39,7 @@ dino:
     warmup_epochs: 0
 
 ibot:
-  loss_weight: 1.0
+  loss_weight: 0.1  # Keep disabled for testing DINO loss in isolation
   mask_sample_probability: 0.5
   mask_ratio_min_max:
     - 0.1
@@ -40,20 +47,22 @@ ibot:
   mask_random_circular_shift: false
   force_masking_even_with_zero_weight: False
   separate_head: true
-  head_n_prototypes: 65536
+  head_n_prototypes: 1024
   head_bottleneck_dim: 256
   head_norm_last_layer: false
   head_nlayers: 3
   head_hidden_dim: 2048
 
 gram:
-  use_loss: false           # disabled for initial 3D runs
+  use_loss: false           # disable Gram anchoring for overfit test
   compute_stats: false
   loss_weight: 1.0
-  ema_teacher: false
+  # Use EMA teacher as Gram teacher (no separate Gram teacher backbone)
+  ema_teacher: true
   ckpt: null
-  it_load_ema_teacher: -1
-  rep_update: false
+  # Required when ckpt is None: non-negative iteration at which to load EMA -> Gram teacher
+  it_load_ema_teacher: 0
+  rep_update: false         # no repeated updates needed when using EMA teacher
   update_frequency: 50000
   it_first_update: 0
   max_updates: null
@@ -67,18 +76,19 @@ gram:
   loss_weight_schedule: null
 
 train:
-  batch_size_per_gpu: 2         # smaller for 3D memory footprint / testing
+  batch_size_per_gpu: 4      # smaller for 3D memory footprint / testing
   dataset_path: CTVolume:root=/home/lukas/data/ARTILLERY/images_binary
   data_config: null
-  output_dir: ./ct3d_output
+  output_dir: ./work_dir/sanity_check
   saveckp_freq: 20
   seed: 0
   num_workers: 4
-  OFFICIAL_EPOCH_LENGTH: 100    # shorter for quick tests
+  OFFICIAL_EPOCH_LENGTH: 700   # shorter for quick tests
   monitor_gradient_norm: false
   chunk_schedule: []
   use_teacher_head: true
   learn_from_teacher_tokens: false
+  # Sinkhorn-Knopp centering is generally more robust against uniform-collapse than softmax+center.
   centering: "sinkhorn_knopp"
   checkpointing: false
   checkpointing_full: false
@@ -88,11 +98,11 @@ train:
   cache_dataset: false
 
 student:
-  arch: vit3d_large
+  arch: vit3d_base
   patch_size: 16
   patch_size_d: 2
-  drop_path_rate: 0.3
-  layerscale: 1.0e-05
+  drop_path_rate: 0.1
+  layerscale: null    # IMPORTANT: null for training from scratch; 1e-5 makes the network nearly input-invariant early on
   pretrained_weights: ""
   ffn_layer: "mlp"
   ffn_ratio: 4.0
@@ -119,11 +129,14 @@ student:
   fp8_filter: "blocks"
 
 teacher:
-  momentum_teacher: 0.992
-  final_momentum_teacher: 1
-  warmup_teacher_temp: 0.04
-  teacher_temp: 0.07
-  warmup_teacher_temp_epochs: 30
+  # Faster/stronger teacher to avoid uniform collapse:
+  # - Start with lower momentum so the teacher tracks the student early
+  # - Sharper steady-state temp, short warmup
+  momentum_teacher: 0.99
+  final_momentum_teacher: 0.995
+  warmup_teacher_temp: 0.07
+  teacher_temp: 0.04
+  warmup_teacher_temp_epochs: 2
   in_chans: 1
 
 distillation:
@@ -139,18 +152,18 @@ hrft:
   checkpoint_path: ""
 
 optim:
-  epochs: 5                 # short run for testing
+  epochs: 1000                 # short run for testing
   optimizer: adamw
-  weight_decay: 0.04
-  weight_decay_end: 0.4
-  lr: 0.0005
-  warmup_epochs: 1
-  min_lr: 1.0e-06
+  weight_decay: 0.00004
+  weight_decay_end: 0.00004
+  lr: 0.0005                   # Increased LR to actually learn (was 0.0003)
+  warmup_epochs: 5              # Reduced warmup so learning starts earlier (was 20)
+  min_lr: 1.0e-06               # Lower than peak LR for proper decay
   schedule_trunc_extra: 0.0
   clip_grad: 3.0
-  freeze_last_layer_epochs: 1
-  scaling_rule: sqrt_wrt_1024
-  patch_embed_lr_mult: 0.2
+  freeze_last_layer_epochs: 2
+  scaling_rule: null            # Disable LR downscaling; use full lr
+  patch_embed_lr_mult: 0.5
   dino_head_wd_multiplier: 1.0
   layerwise_decay: 0.9
   multi_tensor_optim: true
@@ -160,12 +173,12 @@ optim:
 
 crops:
   global_crops_scale:
-    - 0.32
+    - 0.30
     - 1.0
   local_crops_number: 4
   local_crops_scale:
-    - 0.05
-    - 0.32
+    - 0.10
+    - 0.30
   global_local_crop_pairs_ratios: 1.0
   localcrops_subset_of_globalcrops: false
   horizontal_flips: true
@@ -175,13 +188,15 @@ crops:
   use_3d_augmentation: true
   # (D, H, W) in voxels for global crops
   global_crops_size_3d:
-    - 64
+    - 192
     - 192
     - 192
   local_crops_size_3d:
-    - 32
     - 96
     - 96
+    - 96
+  # When using ema_teacher=True for Gram, we reuse the student/teacher global crops
+  # so no separate Gram teacher crop size is needed.
   gram_teacher_crops_size_3d: null
   patch_size_3d:
     - 2      # depth
@@ -189,12 +204,12 @@ crops:
     - 16     # width
   ct_window:
     - -1000.0
-    - 400.0
+    - 3000.0
   ct_mean: null
   ct_std: null
 
 evaluation:
-  eval_period_iterations: -1    # disable periodic eval for test run
+  eval_period_iterations: 0    # disable periodic eval
   low_freq_every: 5
   config_files:
     high_freq: benchmark_high_frequency.yaml
