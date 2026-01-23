@@ -181,14 +181,25 @@ def _summarize_crops(sample_dict):
         nz = float((vol.abs() > 1e-6).float().mean().item())
         print(f"{name}: mean={m:.4f} std={s:.4f} nonzero_frac={nz:.4f}")
 
+    def _foreground_summary(vol, name, threshold=-500.0):
+        # Convert back to approximate HU values for foreground analysis
+        # vol is normalized to [0,1] from [-1000, 400] window by default
+        hu_approx = vol * 2400.0 - 1000.0  # rough approximation
+        fg_mask = hu_approx > threshold
+        fg_ratio = float(fg_mask.float().mean().item())
+        print(f"{name}: foreground_ratio={fg_ratio:.4f} (HU > {threshold})")
+
     print("\n=== Crop stats (mean/std/nonzero_frac) ===")
     for i, g in enumerate(sample_dict["global_crops"]):
         _summary(g, f"global[{i}]")
+        _foreground_summary(g, f"global[{i}]")
     for i, l in enumerate(sample_dict["local_crops"]):
         _summary(l, f"local[{i}]")
+        _foreground_summary(l, f"local[{i}]")
     if "gram_teacher_crops" in sample_dict:
         for i, gt in enumerate(sample_dict["gram_teacher_crops"]):
             _summary(gt, f"gram_teacher[{i}]")
+            _foreground_summary(gt, f"gram_teacher[{i}]")
 
 
 def _pca_2d(x: torch.Tensor) -> torch.Tensor:
@@ -438,6 +449,13 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         model.cuda()
     aug = model.build_data_augmentation_dino(cfg)
+
+    # Print foreground cropping configuration
+    print("=== Foreground Cropping Configuration ===")
+    print(f"foreground_threshold: {getattr(aug, 'foreground_threshold', 'N/A')}")
+    print(f"foreground_crop_prob: {getattr(aug, 'foreground_crop_prob', 'N/A')}")
+    print(f"min_foreground_ratio: {getattr(aug, 'min_foreground_ratio', 'N/A')}")
+    print()
 
     # --- Build one-sample batch and visualize crops ---
     print("\n=== Visualizing crops WITH augmentation (including random flips) ===")

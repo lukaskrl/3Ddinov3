@@ -482,6 +482,9 @@ def do_train(cfg, model, resume=False):
             num_gram_updates = math.ceil((start_iter + 1 - cfg.gram.it_first_update) / cfg.gram.update_frequency)
             logger.info(f"Gram was updated {num_gram_updates} times before iteration {start_iter}")
         consecutive_nan_count = 0
+        # Gradient accumulation settings
+        grad_accum_steps = max(1, int(getattr(cfg.train, "gradient_accumulation_steps", 1)))
+
         for data in metric_logger.log_every(
             data_loader,
             print_freq=10,
@@ -493,6 +496,10 @@ def do_train(cfg, model, resume=False):
             data["global_batch_size"] = global_batch_size
             if iteration > max_iter:
                 break
+
+            # Start a new accumulation window by clearing gradients
+            if (iteration - start_iter) % grad_accum_steps == 0:
+                optimizer.zero_grad(set_to_none=True)
 
             # Garbage collection (trigger manually so it happens on all ranks at the same time)
             if (iteration + 1) % 150 == 0:
@@ -511,9 +518,13 @@ def do_train(cfg, model, resume=False):
             last_layer_lr = last_layer_lr_schedule[it]
             apply_optim_scheduler(optimizer, lr, wd, last_layer_lr)
 
-            # Forward backward
-            optimizer.zero_grad(set_to_none=True)
-            total_loss, metrics_dict = model.forward_backward(data, teacher_temp=teacher_temp, iteration=it)
+            # Forward backward (gradients are accumulated across multiple micro-batches
+            # when grad_accum_steps > 1; loss scaling is handled inside model.backprop_loss).
+            total_loss, metrics_dict = model.forward_backward(
+                data,
+                teacher_temp=teacher_temp,
+                iteration=it,
+            )
 
             # Gradient clipping
             if cfg.optim.clip_grad:
@@ -558,21 +569,25 @@ def do_train(cfg, model, resume=False):
                     raise RuntimeError(msg)
             else:
                 consecutive_nan_count = 0
-            # Step optimizer
-            optimizer.step()
-            model.update_ema(mom)
 
-            # [GRAM] Update gram teacher when using gram teacher and frequent updates
-            if (
-                cfg.gram.use_loss
-                and model.gram_rep_update
-                and (it + 1) >= model.gram_it_first_update
-                and (it + 1) % model.gram_update_frequency == 0
-                and (cfg.gram.max_updates is None or num_gram_updates < cfg.gram.max_updates)
-            ):
-                logger.info(f"Updating Gram teacher from EMA teacher after iteration {it}")
-                model.update_gram()
-                num_gram_updates += 1
+            # Step optimizer only every grad_accum_steps iterations (or on the very last
+            # iteration) to implement gradient accumulation.
+            should_step = ((iteration + 1 - start_iter) % grad_accum_steps == 0) or (iteration + 1 == max_iter)
+            if should_step:
+                optimizer.step()
+                model.update_ema(mom)
+
+                # [GRAM] Update gram teacher when using gram teacher and frequent updates
+                if (
+                    cfg.gram.use_loss
+                    and model.gram_rep_update
+                    and (it + 1) >= model.gram_it_first_update
+                    and (it + 1) % model.gram_update_frequency == 0
+                    and (cfg.gram.max_updates is None or num_gram_updates < cfg.gram.max_updates)
+                ):
+                    logger.info(f"Updating Gram teacher from EMA teacher after iteration {it}")
+                    model.update_gram()
+                    num_gram_updates += 1
 
             # Log metrics
             metric_logger.update(lr=lr)

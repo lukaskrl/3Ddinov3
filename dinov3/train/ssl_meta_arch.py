@@ -23,7 +23,6 @@ from dinov3.train.cosine_lr_scheduler import linear_warmup_cosine_decay
 from dinov3.train.param_groups import fuse_params_groups, get_params_groups_with_decay_fsdp
 from dinov3.utils import count_parameters
 
-
 logger = logging.getLogger("dinov3")
 
 
@@ -80,13 +79,7 @@ class SSLMetaArch(nn.Module):
         )
         student_model_dict["dino_head"] = dino_head_class()
         teacher_model_dict["dino_head"] = dino_head_class()
-        
-        # Configure DINO loss hyperparameters
-        student_temp = getattr(cfg.dino, "student_temp", 0.1)
-        center_momentum = getattr(cfg.dino, "center_momentum", 0.9)
-        logger.info(f"OPTIONS -- DINO -- student_temp: {student_temp}")
-        logger.info(f"OPTIONS -- DINO -- center_momentum: {center_momentum}")
-        self.dino_loss = DINOLoss(self.dino_out_dim, student_temp=student_temp, center_momentum=center_momentum)
+        self.dino_loss = DINOLoss(self.dino_out_dim)
 
         logger.info("OPTIONS -- KOLEO")
         logger.info(f"OPTIONS -- KOLEO -- loss_weight: {cfg.dino.koleo_loss_weight}")
@@ -451,79 +444,7 @@ class SSLMetaArch(nn.Module):
             iteration=iteration,
         )
 
-        # Check loss value and student outputs before backprop
-        with torch.no_grad():
-            metrics_dict["loss_value"] = loss_accumulator.item() if isinstance(loss_accumulator, torch.Tensor) else float(loss_accumulator)
-            if isinstance(loss_accumulator, torch.Tensor):
-                metrics_dict["loss_is_nan"] = float(torch.isnan(loss_accumulator).item())
-                metrics_dict["loss_is_inf"] = float(torch.isinf(loss_accumulator).item())
-                metrics_dict["loss_is_zero"] = float((loss_accumulator.abs() < 1e-8).item())
-            
-            # Check if student outputs require grad (they should!)
-            student_cls_requires_grad = student_global["cls_after_head"].requires_grad
-            metrics_dict["student_cls_requires_grad"] = float(student_cls_requires_grad)
-            
-            # Check if loss is connected to student outputs
-            if isinstance(loss_accumulator, torch.Tensor) and student_cls_requires_grad:
-                # Try to compute a dummy gradient to see if graph is connected
-                try:
-                    dummy_grad = torch.autograd.grad(
-                        outputs=loss_accumulator,
-                        inputs=student_global["cls_after_head"],
-                        retain_graph=True,
-                        create_graph=False,
-                        only_inputs=True
-                    )
-                    if dummy_grad[0] is not None:
-                        metrics_dict["loss_to_student_grad_norm"] = dummy_grad[0].norm().item()
-                    else:
-                        metrics_dict["loss_to_student_grad_norm"] = 0.0
-                except Exception as e:
-                    metrics_dict["loss_to_student_grad_norm"] = -1.0  # Error computing grad
-        
         self.backprop_loss(loss_accumulator)
-        
-        # Add gradient diagnostics AFTER backprop (before clipping)
-        # Note: With FSDP, we need to check if params have gradients
-        with torch.no_grad():
-            # Check backbone gradients after backprop
-            backbone_grad_norm_after = 0.0
-            backbone_has_grad = False
-            try:
-                # Try to get parameters - with FSDP this might be tricky
-                if hasattr(self.student.backbone, 'parameters'):
-                    backbone_params = list(self.student.backbone.parameters())
-                    if len(backbone_params) > 0:
-                        # Check first few parameters
-                        for p in backbone_params[:10]:
-                            if p.grad is not None:
-                                backbone_has_grad = True
-                                backbone_grad_norm_after += p.grad.norm().item()
-                        if backbone_has_grad:
-                            backbone_grad_norm_after = backbone_grad_norm_after / min(10, len(backbone_params))
-            except Exception:
-                pass  # FSDP might make this tricky
-            
-            # Check head gradients after backprop
-            head_grad_norm_after = 0.0
-            head_has_grad = False
-            try:
-                if hasattr(self.student.dino_head, 'parameters'):
-                    head_params = list(self.student.dino_head.parameters())
-                    if len(head_params) > 0:
-                        for p in head_params[:10]:
-                            if p.grad is not None:
-                                head_has_grad = True
-                                head_grad_norm_after += p.grad.norm().item()
-                        if head_has_grad:
-                            head_grad_norm_after = head_grad_norm_after / min(10, len(head_params))
-            except Exception:
-                pass
-            
-            metrics_dict["backbone_grad_norm_after_bp"] = backbone_grad_norm_after
-            metrics_dict["backbone_has_grad"] = float(backbone_has_grad)
-            metrics_dict["head_grad_norm_after_bp"] = head_grad_norm_after
-            metrics_dict["head_has_grad"] = float(head_has_grad)
 
         # Return total weighted loss and a dict of metrics to log
         return loss_accumulator, metrics_dict | loss_dict
@@ -867,75 +788,6 @@ class SSLMetaArch(nn.Module):
             ignore_diagonal=self.dino_global_ignore_diagonal,
         )
         loss_dict["dino_global_crops_loss"] = dino_global_crops_loss
-        
-        # Comprehensive diagnostics to verify loss computation
-        with torch.no_grad():
-            teacher_probs_flat = teacher_global["cls_centered"].flatten(0, 1)  # [n_crops * B, K]
-            student_logits_flat = student_global["cls_after_head"].flatten(0, 1)  # [n_crops * B, K]
-            
-            # CRITICAL: Check teacher outputs BEFORE centering (if available)
-            if "cls_after_head" in teacher_global:
-                teacher_logits_before_centering = teacher_global["cls_after_head"].flatten(0, 1)  # [n_crops * B, K]
-                teacher_logits_std = teacher_logits_before_centering.std(dim=-1).mean()  # Should be > 0 if not uniform
-                teacher_logits_max = teacher_logits_before_centering.max(dim=-1)[0].mean()
-                teacher_logits_min = teacher_logits_before_centering.min(dim=-1)[0].mean()
-                teacher_logits_range = teacher_logits_max - teacher_logits_min
-                loss_dict["dino_teacher_logits_std"] = teacher_logits_std  # If ~0, outputs are uniform
-                loss_dict["dino_teacher_logits_range"] = teacher_logits_range  # If ~0, outputs are uniform
-                loss_dict["dino_teacher_logits_max"] = teacher_logits_max
-                loss_dict["dino_teacher_logits_min"] = teacher_logits_min
-                
-                # Check if teacher outputs are uniform BEFORE centering
-                teacher_logits_softmax_before = nn.functional.softmax(teacher_logits_before_centering, dim=-1)
-                teacher_entropy_before = -(teacher_logits_softmax_before.clamp_min(1e-8) * teacher_logits_softmax_before.clamp_min(1e-8).log()).sum(dim=-1).mean()
-                K = teacher_logits_before_centering.shape[-1]
-                uniform_entropy = float(torch.log(torch.tensor(K, dtype=teacher_entropy_before.dtype, device=teacher_entropy_before.device)))
-                loss_dict["dino_teacher_entropy_before_centering"] = teacher_entropy_before
-                loss_dict["dino_teacher_entropy_before_vs_uniform"] = teacher_entropy_before / uniform_entropy
-            
-            # Verify teacher probs sum to 1
-            teacher_probs_sum = teacher_probs_flat.sum(dim=-1)
-            loss_dict["dino_teacher_probs_sum"] = teacher_probs_sum.mean()  # Should be ~1.0
-            loss_dict["dino_teacher_probs_sum_std"] = teacher_probs_sum.std()
-            
-            # Teacher entropy (if uniform, entropy = ln(K))
-            teacher_probs_flat_clamped = teacher_probs_flat.clamp_min(1e-8)
-            teacher_entropy = -(teacher_probs_flat_clamped * teacher_probs_flat_clamped.log()).sum(dim=-1).mean()
-            K = teacher_probs_flat.shape[-1]
-            uniform_entropy = float(torch.log(torch.tensor(K, dtype=teacher_entropy.dtype, device=teacher_entropy.device)))
-            loss_dict["dino_teacher_entropy"] = teacher_entropy
-            loss_dict["dino_teacher_entropy_vs_uniform"] = teacher_entropy / uniform_entropy  # 1.0 = uniform, <1.0 = learning
-            
-            # Student entropy (should be lower than teacher initially)
-            student_probs_flat = nn.functional.softmax(student_logits_flat / self.dino_loss.student_temp, dim=-1)
-            student_probs_flat_clamped = student_probs_flat.clamp_min(1e-8)
-            student_entropy = -(student_probs_flat_clamped * student_probs_flat_clamped.log()).sum(dim=-1).mean()
-            loss_dict["dino_student_entropy"] = student_entropy
-            loss_dict["dino_student_entropy_vs_uniform"] = student_entropy / uniform_entropy
-            
-            # Max probability (if uniform, max_prob ≈ 1/K)
-            teacher_max_prob = teacher_probs_flat.max(dim=-1)[0].mean()
-            student_max_prob = student_probs_flat.max(dim=-1)[0].mean()
-            loss_dict["dino_teacher_max_prob"] = teacher_max_prob
-            loss_dict["dino_student_max_prob"] = student_max_prob
-            loss_dict["dino_teacher_max_prob_vs_uniform"] = teacher_max_prob / (1.0 / K)  # >1.0 = peaked, 1.0 = uniform
-            
-            # Center statistics (for softmax centering)
-            center_norm = self.dino_loss.center.norm().item()
-            loss_dict["dino_center_norm"] = center_norm
-            
-            # Teacher probs difference between crops (if identical, model isn't learning crop-specific features)
-            if n_global_crops >= 2:
-                crop0_probs = teacher_global["cls_centered"][0]  # [B, K]
-                crop1_probs = teacher_global["cls_centered"][1]  # [B, K]
-                crop_diff = (crop0_probs - crop1_probs).abs().mean()
-                loss_dict["dino_teacher_crop_diff"] = crop_diff  # 0.0 = identical crops (bad), >0 = learning differences
-                
-                # Cross-entropy between crops (should decrease as model learns)
-                crop0_log_probs = crop0_probs.clamp_min(1e-8).log()
-                crop_cross_entropy = -(crop0_probs * crop1_probs.clamp_min(1e-8).log()).sum(dim=-1).mean()
-                loss_dict["dino_teacher_crop_cross_entropy"] = crop_cross_entropy
-        
         loss_accumulator += self.dino_loss_weight * dino_global_scale * dino_global_crops_loss
 
         # Koleo: regularize pre-head CLS tokens of student(global crops)
@@ -1014,6 +866,14 @@ class SSLMetaArch(nn.Module):
         raise NotImplementedError
 
     def backprop_loss(self, loss):
+        # Support gradient accumulation by scaling the loss when requested.
+        # This keeps the effective gradient comparable to the non-accumulation case
+        # when we apply gradients only every N micro-batches.
+        accum_steps = getattr(self.cfg.train, "gradient_accumulation_steps", 1)
+        if accum_steps is None:
+            accum_steps = 1
+        if accum_steps > 1:
+            loss = loss / accum_steps
         loss.backward()
 
     def update_ema(self, m):

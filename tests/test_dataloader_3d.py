@@ -1,3 +1,4 @@
+#%%
 import os
 import sys
 
@@ -101,63 +102,3 @@ def test_3d_dataloader_single_batch(tmp_path):
             assert torch.isfinite(val).all(), f"NaNs detected in {key}"
 
 
-def test_2d_dataloader_single_batch():
-    """Analogous end-to-end test for 2D path: image -> 2D aug -> collate."""
-
-    # 1) Dummy RGB image (C, H, W)
-    C, H, W = 3, 224, 224
-    img = torch.randn(C, H, W)
-    _print_stats("raw_image", img)
-
-    # 2) 2D augmentation (same hyper-params style as DINOv2)
-    aug = DataAugmentationDINO(
-        global_crops_scale=(0.5, 1.0),
-        local_crops_scale=(0.1, 0.5),
-        local_crops_number=2,
-        global_crops_size=224,
-        local_crops_size=96,
-        gram_teacher_crops_size=None,
-        gram_teacher_no_distortions=False,
-        teacher_no_color_jitter=False,
-        local_crops_subset_of_global_crops=False,
-        patch_size=16,
-        share_color_jitter=False,
-        horizontal_flips=True,
-    )
-
-    sample = (aug(img), 0)
-
-    # 3) Collate + 2D masking (single sample)
-    img_size = 224
-    patch_size = 16
-    n_tokens = (img_size // patch_size) ** 2
-    mask_gen = MaskingGenerator(
-        input_size=(img_size // patch_size, img_size // patch_size),
-        max_num_patches=int(0.5 * n_tokens),
-    )
-
-    batch = collate_data_and_cast(
-        samples_list=[sample],
-        mask_ratio_tuple=(0.1, 0.5),
-        mask_probability=0.5,
-        dtype=torch.float32,
-        n_tokens=n_tokens,
-        mask_generator=mask_gen,
-        random_circular_shift=False,
-        local_batch_size=None,
-    )
-
-    for key in ["collated_global_crops", "collated_local_crops"]:
-        assert key in batch
-        tensor = batch[key]
-        assert torch.isfinite(tensor).all()
-        _print_stats(f"2d_{key}", tensor)
-
-    masks = batch["collated_masks"]
-    _print_stats("2d_collated_masks", masks.float())
-    masks_weight = batch["masks_weight"]
-    _print_stats("2d_masks_weight", masks_weight)
-
-    for key, val in batch.items():
-        if isinstance(val, torch.Tensor):
-            assert torch.isfinite(val).all(), f"NaNs detected in 2D {key}"

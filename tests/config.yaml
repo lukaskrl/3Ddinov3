@@ -10,26 +10,28 @@ compute_precision:
 dino:
   loss_weight: 1.0
   global_ignore_diagonal: true
-  head_n_prototypes: 64
+  head_n_prototypes: 1024
   head_bottleneck_dim: 256
   head_norm_last_layer: true
   head_nlayers: 3
   head_hidden_dim: 2048
-  koleo_loss_weight: 0.0
+  koleo_loss_weight: 0.1
   koleo_loss_distributed: false
   koleo_topk: 1
   koleo_distributed_replicas: 0
   koleo_distributed_loss_group_size: null
   koleo_distributed_loss_group_data: true
   force_weight_norm: false
-  reweight_dino_local_loss: false
+  reweight_dino_local_loss: true
   local_loss_weight_schedule:
-    start: 0.5
-    peak: 0.5
-    end: 0.5
-    warmup_epochs: 0
+    start: 0.0
+    peak: 1.0
+    end: 1.0
+    warmup_epochs: 10
+  student_temp: 0.1
+  center_momentum: 0.9
 ibot:
-  loss_weight: 0
+  loss_weight: 1
   mask_sample_probability: 0.5
   mask_ratio_min_max:
   - 0.1
@@ -62,19 +64,19 @@ gram:
   global_teacher_resize_antialias: false
   loss_weight_schedule: null
 train:
-  batch_size_per_gpu: 2
+  batch_size_per_gpu: 4
   dataset_path: CTVolume:root=/home/lukas/data/ARTILLERY/images_binary
   data_config: null
   output_dir: ./work_dir/sanity_check
   saveckp_freq: 20
   seed: 0
   num_workers: 4
-  OFFICIAL_EPOCH_LENGTH: 60
+  OFFICIAL_EPOCH_LENGTH: 700
   monitor_gradient_norm: false
   chunk_schedule: []
   use_teacher_head: true
   learn_from_teacher_tokens: false
-  centering: softmax
+  centering: sinkhorn_knopp
   checkpointing: false
   checkpointing_full: false
   compile: true
@@ -112,11 +114,11 @@ student:
   fp8_filter: blocks
   patch_size_d: 2
 teacher:
-  momentum_teacher: 0.0
+  momentum_teacher: 0.99
   final_momentum_teacher: 1
   warmup_teacher_temp: 0.02
-  teacher_temp: 0.02
-  warmup_teacher_temp_epochs: 0
+  teacher_temp: 0.04
+  warmup_teacher_temp_epochs: 10
   in_chans: 1
 distillation:
   enabled: false
@@ -128,17 +130,17 @@ hrft:
   enabled: false
   checkpoint_path: ''
 optim:
-  epochs: 10000
+  epochs: 5000
   optimizer: adamw
-  weight_decay: 4.0e-05
-  weight_decay_end: 4.0e-05
-  lr: 0.001
-  warmup_epochs: 0
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  lr: 0.0005
+  warmup_epochs: 5
   min_lr: 1.0e-06
   schedule_trunc_extra: 0.0
   clip_grad: 3.0
-  freeze_last_layer_epochs: 0
-  scaling_rule: null
+  freeze_last_layer_epochs: 2
+  scaling_rule: sqrt_wrt_1024
   patch_embed_lr_mult: 0.2
   dino_head_wd_multiplier: 1.0
   layerwise_decay: 0.9
@@ -148,12 +150,12 @@ optim:
   adamw_beta2: 0.999
 crops:
   global_crops_scale:
-  - 0.3
+  - 0.5
   - 1.0
   local_crops_number: 4
   local_crops_scale:
-  - 0.1
-  - 0.3
+  - 0.2
+  - 0.5
   global_crops_size: 224
   local_crops_size: 96
   global_local_crop_pairs_ratios: 1.0
@@ -187,9 +189,12 @@ crops:
   - 16
   ct_window:
   - -1000.0
-  - 3000.0
+  - 2000.0
   ct_mean: null
   ct_std: null
+  foreground_threshold: 500
+  foreground_crop_prob: 1
+  min_foreground_ratio: 0.3
 evaluation:
   eval_period_iterations: 0
   low_freq_every: 5

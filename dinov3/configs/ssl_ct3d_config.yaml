@@ -78,6 +78,7 @@ gram:
 
 train:
   batch_size_per_gpu: 4      # smaller for 3D memory footprint / testing
+  gradient_accumulation_steps: 32  # Number of micro-batches to accumulate before each optimizer step
   dataset_path: CTVolume:root=/home/lukas/data/ARTILLERY/images_binary
   data_config: null
   output_dir: ./work_dir/sanity_check
@@ -100,8 +101,8 @@ train:
 
 student:
   arch: vit3d_base
-  patch_size: 16
-  patch_size_d: 2
+  patch_size: 8
+  patch_size_d: 8
   drop_path_rate: 0.1
   layerscale: null    # IMPORTANT: null for training from scratch; 1e-5 makes the network nearly input-invariant early on
   pretrained_weights: ""
@@ -136,8 +137,8 @@ teacher:
   # - End with higher EMA momentum for a smoother target later in training
   momentum_teacher: 0.99
   final_momentum_teacher: 1
-  warmup_teacher_temp: 0.04
-  teacher_temp: 0.07
+  warmup_teacher_temp: 0.02
+  teacher_temp: 0.04
   warmup_teacher_temp_epochs: 10
   in_chans: 1
 
@@ -158,7 +159,7 @@ optim:
   optimizer: adamw
   weight_decay: 0.04
   weight_decay_end: 0.4
-  lr: 0.0005                   # Increased LR to actually learn (was 0.0003)
+  lr: 0.00001                   # Increased LR to actually learn (was 0.0003)
   warmup_epochs: 5              # Reduced warmup so learning starts earlier (was 20)
   min_lr: 1.0e-06               # Lower than peak LR for proper decay
   schedule_trunc_extra: 0.0
@@ -175,12 +176,12 @@ optim:
 
 crops:
   global_crops_scale:
-    - 0.5
+    - 0.3
     - 1.0
   local_crops_number: 4
   local_crops_scale:
-    - 0.20
-    - 0.50
+    - 0.30
+    - 1.00
   global_local_crop_pairs_ratios: 1.0
   localcrops_subset_of_globalcrops: false
   horizontal_flips: true
@@ -201,14 +202,19 @@ crops:
   # so no separate Gram teacher crop size is needed.
   gram_teacher_crops_size_3d: null
   patch_size_3d:
-    - 2      # depth
-    - 16     # height
-    - 16     # width
+    - 8      # depth
+    - 8     # height
+    - 8     # width
   ct_window:
-    - -1000.0
-    - 2000.0
+    - -1024.0
+    - 2048.0
   ct_mean: null
   ct_std: null
+
+  # Foreground cropping parameters
+  foreground_threshold: 500    # HU threshold for foreground (above this is foreground)
+  foreground_crop_prob: 0       # Probability of using foreground-biased cropping
+  min_foreground_ratio: 0.3       # Minimum foreground ratio required in crop
 
 evaluation:
   eval_period_iterations: 0    # disable periodic eval

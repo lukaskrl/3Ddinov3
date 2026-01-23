@@ -63,6 +63,7 @@ gram:
   loss_weight_schedule: null  # (dict): If not None, use a schedule for the loss weight instead of `loss_weight`
 train:
   batch_size_per_gpu: 64
+  gradient_accumulation_steps: 1  # Number of micro-batches to accumulate before each optimizer step
   dataset_path: ImageNet:split=TRAIN
   data_config: null
   output_dir: .
