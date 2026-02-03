@@ -997,6 +997,9 @@ class SSLMetaArch(nn.Module):
                 ct_window=getattr(cfg.crops, "ct_window", (-1000.0, 400.0)),
                 mean=getattr(cfg.crops, "ct_mean", None),
                 std=getattr(cfg.crops, "ct_std", None),
+                foreground_threshold=getattr(cfg.crops, "foreground_threshold", None),
+                foreground_crop_prob=getattr(cfg.crops, "foreground_crop_prob", 0.0),
+                min_foreground_ratio=getattr(cfg.crops, "min_foreground_ratio", 0.3),
             )
 
         return DataAugmentationDINO(

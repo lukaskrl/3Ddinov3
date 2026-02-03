@@ -101,7 +101,7 @@ def _build_single_sample_batch(cfg, aug, volume: torch.Tensor, disable_flips=Fal
     return batch, sample_dict
 
 
-def _visualize_crops(sample_dict, original_volume=None, show_original=False):
+def _visualize_crops(sample_dict, original_volume=None, show_original=False, foreground_threshold=None):
     """
     Visualize a few slices from the global and local crops.
     Assumes C=1 (single-channel CT).
@@ -168,8 +168,16 @@ def _visualize_crops(sample_dict, original_volume=None, show_original=False):
     for row, (vol, label) in enumerate(zip(crops_to_plot, crop_labels)):
         _plot_volume(axes[row], vol, label)
 
-    plt.suptitle("3D CT Crops Visualization\n(Note: horizontal_flips may cause crops to appear flipped)", 
-                 fontsize=12, y=0.995)
+    if foreground_threshold is None:
+        fg_title = "foreground_threshold: N/A"
+    else:
+        fg_title = f"foreground_threshold: {foreground_threshold}"
+    plt.suptitle(
+        "3D CT Crops Visualization\n"
+        f"({fg_title}; Note: horizontal_flips may cause crops to appear flipped)",
+        fontsize=12,
+        y=0.995,
+    )
     plt.tight_layout()
     plt.show()
 
@@ -312,6 +320,7 @@ def _plot_cls_diagnostics(cfg, model: SSLMetaArch, batch: dict):
         diff_t_logits_centered = _mean_abs_diff_centered_over_k(t_logits[0], t_logits[1])
         print(f"teacher_logits crop0-vs-crop1 mean|diff|: {diff_t_logits:.6f}")
         print(f"teacher_logits crop0-vs-crop1 mean|diff| (mean-centered over K): {diff_t_logits_centered:.6f}")
+        
         # Compare teacher CLS pre-head (D-dim)
         t_pre = teacher_global["cls_pre_head"]  # [2, B, D]
         diff_t_pre = _mean_abs_diff(t_pre[0], t_pre[1])
@@ -449,6 +458,7 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         model.cuda()
     aug = model.build_data_augmentation_dino(cfg)
+    print("config and model loaded.", cfg)
 
     # Print foreground cropping configuration
     print("=== Foreground Cropping Configuration ===")
@@ -460,17 +470,19 @@ if __name__ == "__main__":
     # --- Build one-sample batch and visualize crops ---
     print("\n=== Visualizing crops WITH augmentation (including random flips) ===")
     batch, sample_dict = _build_single_sample_batch(cfg, aug, volume, disable_flips=False)
-    _visualize_crops(sample_dict, original_volume=volume, show_original=True)
-    
-    print("\n=== Visualizing crops WITHOUT flips (for orientation comparison) ===")
-    batch_no_flip, sample_dict_no_flip = _build_single_sample_batch(cfg, aug, volume, disable_flips=True)
-    _visualize_crops(sample_dict_no_flip, original_volume=volume, show_original=True)
+    _visualize_crops(
+        sample_dict,
+        original_volume=volume,
+        show_original=True,
+        foreground_threshold=getattr(aug, "foreground_threshold", None),
+    )
+
 
     # Print simple stats on crops
     _summarize_crops(sample_dict)
 
     # --- Compute losses (DINO global/local + iBOT) for this one batch ---
-    
+#%%
     teacher_temp = cfg.teacher.teacher_temp
 
     loss, metrics = model.forward_backward(

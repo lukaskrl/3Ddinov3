@@ -34,10 +34,10 @@ dino:
   # Warm up local-crop DINO term; helps early stability (local crops can be noisy/too hard).
   reweight_dino_local_loss: true
   local_loss_weight_schedule:
-    start: 0.0
+    start: 5.0
     peak: 1.0
     end: 1.0
-    warmup_epochs: 10
+    warmup_epochs: 2
 
 ibot:
   loss_weight: 1  # Keep disabled for testing DINO loss in isolation
@@ -164,7 +164,7 @@ optim:
   min_lr: 1.0e-06               # Lower than peak LR for proper decay
   schedule_trunc_extra: 0.0
   clip_grad: 3.0
-  freeze_last_layer_epochs: 5
+  freeze_last_layer_epochs: 5 # freeze last layer to stabilize training
   scaling_rule: sqrt_wrt_1024            # Disable LR downscaling; use full lr
   patch_embed_lr_mult: 0.2
   dino_head_wd_multiplier: 1.0
@@ -214,8 +214,8 @@ crops:
 
   # Foreground cropping parameters
   foreground_threshold: 500    # HU threshold for foreground (above this is foreground)
-  foreground_crop_prob: 0       # Probability of using foreground-biased cropping
-  min_foreground_ratio: 0.3       # Minimum foreground ratio required in crop
+  foreground_crop_prob: 1.0       # Probability of using foreground-biased cropping
+  min_foreground_ratio: 0.4       # Minimum foreground ratio required in crop
 
 evaluation:
   eval_period_iterations: 0    # disable periodic eval
