@@ -765,6 +765,60 @@ class SSLMetaArch(nn.Module):
         dino_local_scale = dino_local_terms / (dino_global_terms + dino_local_terms)
         koleo_scale = n_global_crops
 
+        # ============ MODE COLLAPSE DEBUGGING METRICS ============
+        with torch.no_grad():
+            # Teacher output statistics (after centering)
+            teacher_probs = teacher_global["cls_centered"]  # [n_crops, B, K]
+            teacher_probs_flat = teacher_probs.flatten(0, 1)  # [n_crops * B, K]
+            
+            # Entropy: high entropy = more diverse, low entropy = mode collapse
+            teacher_entropy = -(teacher_probs_flat * (teacher_probs_flat + 1e-12).log()).sum(dim=-1).mean()
+            loss_dict["dino_debug/teacher_entropy"] = teacher_entropy
+            
+            # Max probability: if this is too high (close to 1), teacher is collapsing
+            teacher_max_prob = teacher_probs_flat.max(dim=-1)[0].mean()
+            loss_dict["dino_debug/teacher_max_prob"] = teacher_max_prob
+            
+            # Check if teacher is assigning everything to a few prototypes
+            # Compute prototype usage: how many samples assign highest prob to each prototype
+            teacher_argmax = teacher_probs_flat.argmax(dim=-1)  # [n_crops * B]
+            prototype_usage = torch.bincount(teacher_argmax, minlength=self.dino_out_dim).float()
+            loss_dict["dino_debug/prototypes_used"] = (prototype_usage > 0).sum()  # How many prototypes are used
+            loss_dict["dino_debug/max_prototype_usage"] = prototype_usage.max()  # Max samples per prototype
+            
+            # Teacher output statistics before centering
+            teacher_before_center = teacher_global["cls_after_head"].flatten(0, 1)  # [n_crops * B, K]
+            loss_dict["dino_debug/teacher_logits_mean"] = teacher_before_center.mean()
+            loss_dict["dino_debug/teacher_logits_std"] = teacher_before_center.std()
+            loss_dict["dino_debug/teacher_logits_max"] = teacher_before_center.max()
+            loss_dict["dino_debug/teacher_logits_min"] = teacher_before_center.min()
+            
+            # Center statistics (current center values)
+            loss_dict["dino_debug/center_mean"] = self.dino_loss.center.mean()
+            loss_dict["dino_debug/center_std"] = self.dino_loss.center.std()
+            loss_dict["dino_debug/center_max"] = self.dino_loss.center.max()
+            loss_dict["dino_debug/center_min"] = self.dino_loss.center.min()
+            loss_dict["dino_debug/center_drift"] = self.dino_loss.get_center_drift()
+            
+            # Student output statistics (before softmax)
+            student_global_logits = student_global["cls_after_head"].flatten(0, 1)  # [n_crops * B, K]
+            loss_dict["dino_debug/student_global_logits_mean"] = student_global_logits.mean()
+            loss_dict["dino_debug/student_global_logits_std"] = student_global_logits.std()
+            
+            student_local_logits = student_local["cls_after_head"].flatten(0, 1)  # [n_crops * B, K]
+            loss_dict["dino_debug/student_local_logits_mean"] = student_local_logits.mean()
+            loss_dict["dino_debug/student_local_logits_std"] = student_local_logits.std()
+            
+            # Check student diversity after applying student temperature
+            student_global_probs = torch.softmax(student_global_logits / self.dino_loss.student_temp, dim=-1)
+            student_global_entropy = -(student_global_probs * (student_global_probs + 1e-12).log()).sum(dim=-1).mean()
+            loss_dict["dino_debug/student_global_entropy"] = student_global_entropy
+            
+            student_local_probs = torch.softmax(student_local_logits / self.dino_loss.student_temp, dim=-1)
+            student_local_entropy = -(student_local_probs * (student_local_probs + 1e-12).log()).sum(dim=-1).mean()
+            loss_dict["dino_debug/student_local_entropy"] = student_local_entropy
+        # ============ END MODE COLLAPSE DEBUGGING ============
+
         # DINO local loss: compare post-head CLS tokens: student(local crops) vs. teacher(global crops)
         dino_local_crops_loss = self.dino_loss(
             student_logits=student_local["cls_after_head"],

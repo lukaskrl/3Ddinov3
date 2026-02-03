@@ -159,12 +159,12 @@ optim:
   optimizer: adamw
   weight_decay: 0.04
   weight_decay_end: 0.4
-  lr: 0.00001                   # Increased LR to actually learn (was 0.0003)
+  lr: 0.00005                   # Increased LR to actually learn (was 0.0003)
   warmup_epochs: 5              # Reduced warmup so learning starts earlier (was 20)
   min_lr: 1.0e-06               # Lower than peak LR for proper decay
   schedule_trunc_extra: 0.0
   clip_grad: 3.0
-  freeze_last_layer_epochs: 2
+  freeze_last_layer_epochs: 5
   scaling_rule: sqrt_wrt_1024            # Disable LR downscaling; use full lr
   patch_embed_lr_mult: 0.2
   dino_head_wd_multiplier: 1.0
@@ -174,16 +174,17 @@ optim:
   adamw_beta1: 0.9
   adamw_beta2: 0.999
 
+
 crops:
   global_crops_scale:
-    - 0.3
-    - 1.0
+    - 0.03
+    - 0.03
   local_crops_number: 4
   local_crops_scale:
-    - 0.30
-    - 1.00
+    - 0.001
+    - 0.001
   global_local_crop_pairs_ratios: 1.0
-  localcrops_subset_of_globalcrops: false
+  localcrops_subset_of_globalcrops: True
   horizontal_flips: true
   gram_teacher_no_distortions: false
 
@@ -206,8 +207,8 @@ crops:
     - 8     # height
     - 8     # width
   ct_window:
-    - -1024.0
-    - 2048.0
+    - 500
+    - 3000
   ct_mean: null
   ct_std: null
 

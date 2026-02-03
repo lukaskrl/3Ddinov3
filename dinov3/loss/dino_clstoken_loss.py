@@ -24,6 +24,7 @@ class DINOLoss(nn.Module):
         self.student_temp = student_temp
         self.center_momentum = center_momentum
         self.register_buffer("center", torch.full((1, out_dim), math.nan))
+        self.register_buffer("prev_center", torch.full((1, out_dim), math.nan))  # For tracking center drift
         self.updated = True
         self.reduce_handle = None
         self.len_teacher_output = None
@@ -31,6 +32,13 @@ class DINOLoss(nn.Module):
 
     def init_weights(self) -> None:
         self.center.zero_()
+        self.prev_center.zero_()
+
+    def get_center_drift(self):
+        """Compute L2 distance between current and previous center."""
+        if torch.isnan(self.prev_center).any():
+            return torch.tensor(0.0, device=self.center.device)
+        return torch.norm(self.center - self.prev_center, p=2)
 
     @torch.no_grad()
     def softmax_center_teacher(self, teacher_output, teacher_temp, update_centers=True):
@@ -119,6 +127,9 @@ class DINOLoss(nn.Module):
                 self.reduce_handle.wait()
             _t = self.async_batch_center / (self.len_teacher_output * world_size)
 
+            # Store previous center before updating
+            self.prev_center.copy_(self.center)
+            
             self.center = self.center * self.center_momentum + _t * (1 - self.center_momentum)
 
             self.updated = True
