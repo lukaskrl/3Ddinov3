@@ -1,5 +1,7 @@
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Any
+import nibabel as nib
+
 
 import numpy as np
 import torch
@@ -8,11 +10,11 @@ from torch.utils.data import Dataset
 
 class CTVolumeDataset(Dataset):
     """
-    Simple dataset for 3D volumetric CT data stored as NumPy binaries (.npy).
+    Simple dataset for 3D volumetric CT data stored as NumPy binaries (.npy) or NIfTI files (.nii.gz).
 
     Expected directory structure:
         root/
-            *.npy          # each file is one volume, shape (D, H, W) or (C, D, H, W)
+            *.npy, *.nii.gz    # each file is one volume, shape (D, H, W) or (C, D, H, W)
 
     Notes:
         - We currently ignore labels and return a dummy target (0) to fit the
@@ -55,19 +57,32 @@ class CTVolumeDataset(Dataset):
         self.target_transform = target_transform
         self.transforms = transforms
 
-        self._paths: List[str] = sorted(
-            str(p) for p in Path(self.root).glob("*.npy") if p.is_file()
-        )
+        # Collect both .npy and .nii.gz files
+        npy_files = list(Path(self.root).glob("*.npy"))
+        nii_files = list(Path(self.root).glob("*.gz"))
+        all_files = [p for p in npy_files + nii_files if p.is_file()]
+        self._paths: List[str] = sorted(str(p) for p in all_files)
 
         if len(self._paths) == 0:
-            raise RuntimeError(f"No .npy volumes found in {self.root}")
+            raise RuntimeError(f"No  volumes found in {self.root}")
 
     def __len__(self) -> int:
         return len(self._paths)
 
     def _load_volume(self, index: int) -> torch.Tensor:
+
         path = self._paths[index]
-        arr = np.load(path)
+        # if path is .npy used load else .nii/.nii.gz use nibabel   
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"Volume file not found: {path}")
+
+        if path.endswith('.npy'):
+            arr = np.load(path)
+        else:
+
+            nii = nib.load(path)
+            arr = nii.get_fdata()
+            arr = arr.astype(np.float32)
 
         # Accept (D, H, W) or (C, D, H, W). Convert to torch.FloatTensor.
         if arr.ndim == 3:

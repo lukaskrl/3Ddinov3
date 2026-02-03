@@ -1,0 +1,232 @@
+MODEL:
+  META_ARCHITECTURE: SSLMetaArch
+  DEVICE: cuda
+  WEIGHTS: ""
+  DTYPE: float32
+
+compute_precision:
+  param_dtype: bf16
+  reduce_dtype: fp32
+  sharding_strategy: SHARD_GRAD_OP
+
+dino:
+  loss_weight: 1.0
+  global_ignore_diagonal: true
+  head_n_prototypes: 1024
+  head_bottleneck_dim: 256
+  head_norm_last_layer: true
+  head_nlayers: 3
+  head_hidden_dim: 2048
+  # DINO collapse-avoidance knobs
+  # - student_temp: keep reasonably low so student distributions aren't too flat
+  # - center_momentum: lower -> center adapts faster; helps avoid "stale center" issues early on
+  student_temp: 0.1
+  center_momentum: 0.9
+  # A tiny KoLeo weight helps avoid uniform-collapse in small-batch / low-diversity regimes.
+  # Set back to 0.0 if you want to debug DINO in isolation.
+  koleo_loss_weight: 0.1
+  koleo_loss_distributed: false
+  koleo_topk: 1
+  koleo_distributed_replicas: 0
+  koleo_distributed_loss_group_size: null
+  koleo_distributed_loss_group_data: true
+  force_weight_norm: false
+  # Warm up local-crop DINO term; helps early stability (local crops can be noisy/too hard).
+  reweight_dino_local_loss: true
+  local_loss_weight_schedule:
+    start: 5.0
+    peak: 1.0
+    end: 1.0
+    warmup_epochs: 2
+
+ibot:
+  loss_weight: 1  # Keep disabled for testing DINO loss in isolation
+  mask_sample_probability: 0.5
+  mask_ratio_min_max:
+    - 0.1
+    - 0.5
+  mask_random_circular_shift: false
+  force_masking_even_with_zero_weight: False
+  separate_head: true
+  head_n_prototypes: 1024
+  head_bottleneck_dim: 256
+  head_norm_last_layer: false
+  head_nlayers: 3
+  head_hidden_dim: 2048
+
+gram:
+  use_loss: false           # disable Gram anchoring for overfit test
+  compute_stats: false
+  loss_weight: 1.0
+  # Use EMA teacher as Gram teacher (no separate Gram teacher backbone)
+  ema_teacher: true
+  ckpt: null
+  # Required when ckpt is None: non-negative iteration at which to load EMA -> Gram teacher
+  it_load_ema_teacher: 0
+  rep_update: false         # no repeated updates needed when using EMA teacher
+  update_frequency: 50000
+  it_first_update: 0
+  max_updates: null
+  normalized: true
+  img_level: false
+  remove_neg: false
+  remove_only_teacher_neg: false
+  tokens_used: all
+  global_teacher_resize_method: bicubic
+  global_teacher_resize_antialias: false
+  loss_weight_schedule: null
+
+train:
+  batch_size_per_gpu: 8      # smaller for 3D memory footprint / testing
+  gradient_accumulation_steps: 32  # Number of micro-batches to accumulate before each optimizer step
+  dataset_path: CTVolume:root=/home/lukas/data/brain-t1-dataset
+  data_config: null
+  output_dir: ./work_dir/sanity_check
+  saveckp_freq: 20
+  seed: 0
+  num_workers: 4
+  OFFICIAL_EPOCH_LENGTH: 700   # shorter for quick tests
+  monitor_gradient_norm: false
+  chunk_schedule: []
+  use_teacher_head: true
+  learn_from_teacher_tokens: false
+  # Sinkhorn-Knopp centering is generally more robust against uniform-collapse than softmax+center.
+  centering: "sinkhorn_knopp"
+  checkpointing: false
+  checkpointing_full: false
+  compile: true
+  cudagraphs: false
+  sharded_eval_checkpoint: false
+  cache_dataset: false
+
+student:
+  arch: vit3d_base
+  patch_size: 8
+  patch_size_d: 8
+  drop_path_rate: 0.1
+  layerscale: null    # IMPORTANT: null for training from scratch; 1e-5 makes the network nearly input-invariant early on
+  pretrained_weights: ""
+  ffn_layer: "mlp"
+  ffn_ratio: 4.0
+  resume_from_teacher_chkpt: ""
+  qkv_bias: true
+  proj_bias: true
+  ffn_bias: true
+  norm_layer: "layernorm"
+  n_storage_tokens: 0
+  mask_k_bias: false
+  untie_cls_and_patch_norms: false
+  untie_global_and_local_cls_norm: false
+  in_chans: 1
+  pos_embed_type: rope
+  pos_embed_rope_base: 100.0
+  pos_embed_rope_min_period: null
+  pos_embed_rope_max_period: null
+  pos_embed_rope_normalize_coords: separate
+  pos_embed_rope_shift_coords: null
+  pos_embed_rope_jitter_coords: null
+  pos_embed_rope_rescale_coords: null
+  pos_embed_rope_dtype: bf16
+  fp8_enabled: False
+  fp8_filter: "blocks"
+
+teacher:
+  # Teacher schedule tuned to avoid "uniform teacher" collapse:
+  # - Keep teacher sharp (lower final temp)
+  # - Give it enough warmup epochs so assignments stabilize
+  # - End with higher EMA momentum for a smoother target later in training
+  momentum_teacher: 0.99
+  final_momentum_teacher: 1
+  warmup_teacher_temp: 0.02
+  teacher_temp: 0.04
+  warmup_teacher_temp_epochs: 10
+  in_chans: 1
+
+distillation:
+  enabled: false
+  full_cfg_path: ""
+  checkpoint_path: ""
+
+multidistillation:
+  enabled: false
+
+hrft:
+  enabled: false
+  checkpoint_path: ""
+
+optim:
+  epochs: 5000                 # short run for testing
+  optimizer: adamw
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  lr: 0.00005                   # Increased LR to actually learn (was 0.0003)
+  warmup_epochs: 5              # Reduced warmup so learning starts earlier (was 20)
+  min_lr: 1.0e-06               # Lower than peak LR for proper decay
+  schedule_trunc_extra: 0.0
+  clip_grad: 3.0
+  freeze_last_layer_epochs: 5 # freeze last layer to stabilize training
+  scaling_rule: sqrt_wrt_1024            # Disable LR downscaling; use full lr
+  patch_embed_lr_mult: 0.2
+  dino_head_wd_multiplier: 1.0
+  layerwise_decay: 0.9
+  multi_tensor_optim: true
+  dump_fsdp_weights_path: ""
+  adamw_beta1: 0.9
+  adamw_beta2: 0.999
+
+
+crops:
+  global_crops_scale:
+    - 0.03
+    - 0.03
+  local_crops_number: 4
+  local_crops_scale:
+    - 0.001
+    - 0.001
+  global_local_crop_pairs_ratios: 1.0
+  localcrops_subset_of_globalcrops: True
+  horizontal_flips: true
+  gram_teacher_no_distortions: false
+
+  # 3D CT‑specific options (only these are used in this config)
+  use_3d_augmentation: true
+  # (D, H, W) in voxels for global crops
+  global_crops_size_3d:
+    - 192
+    - 192
+    - 192
+  local_crops_size_3d:
+    - 96
+    - 96
+    - 96
+  # When using ema_teacher=True for Gram, we reuse the student/teacher global crops
+  # so no separate Gram teacher crop size is needed.
+  gram_teacher_crops_size_3d: null
+  patch_size_3d:
+    - 8      # depth
+    - 8     # height
+    - 8     # width
+  ct_window:
+    - 0
+    - 1000
+  ct_mean: null
+  ct_std: null
+
+  # Foreground cropping parameters
+  foreground_threshold: 10    # HU threshold for foreground (above this is foreground)
+  foreground_crop_prob: 1.0       # Probability of using foreground-biased cropping
+  min_foreground_ratio: 0.4       # Minimum foreground ratio required in crop
+
+evaluation:
+  eval_period_iterations: 0    # disable periodic eval
+  low_freq_every: 5
+  config_files:
+    high_freq: benchmark_high_frequency.yaml
+    low_freq: benchmark_low_frequency.yaml
+
+checkpointing:
+  period: 200
+  max_to_keep: 2
+  keep_every: 99999999999999999
+
+
