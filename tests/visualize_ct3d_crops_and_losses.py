@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
 import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
@@ -430,7 +431,7 @@ if __name__ == "__main__":
         distributed.enable()
 
     # --- Load config ---
-    config_file = "/home/lukas/projects/3Ddinov3/dinov3/configs/ssl_ct3d_config.yaml"
+    config_file = "/home/lukas/3Ddinov3/dinov3/configs/ssl_mri3d_config.yaml"
     setup_args = DinoV3SetupArgs(
         config_file=config_file,
         pretrained_weights="",

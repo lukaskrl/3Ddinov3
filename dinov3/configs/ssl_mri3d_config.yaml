@@ -34,7 +34,7 @@ dino:
   # Warm up local-crop DINO term; helps early stability (local crops can be noisy/too hard).
   reweight_dino_local_loss: true
   local_loss_weight_schedule:
-    start: 5.0
+    start: 0.5
     peak: 1.0
     end: 1.0
     warmup_epochs: 2
@@ -78,13 +78,13 @@ gram:
 
 train:
   batch_size_per_gpu: 8      # smaller for 3D memory footprint / testing
-  gradient_accumulation_steps: 32  # Number of micro-batches to accumulate before each optimizer step
+  gradient_accumulation_steps: 1  # Number of micro-batches to accumulate before each optimizer step
   dataset_path: CTVolume:root=/home/lukas/data/brain-t1-dataset
   data_config: null
   output_dir: ./work_dir/sanity_check
   saveckp_freq: 20
   seed: 0
-  num_workers: 4
+  num_workers: 1
   OFFICIAL_EPOCH_LENGTH: 700   # shorter for quick tests
   monitor_gradient_norm: false
   chunk_schedule: []
@@ -97,7 +97,7 @@ train:
   compile: true
   cudagraphs: false
   sharded_eval_checkpoint: false
-  cache_dataset: false
+  cache_dataset: true
 
 student:
   arch: vit3d_base
@@ -213,9 +213,9 @@ crops:
   ct_std: null
 
   # Foreground cropping parameters
-  foreground_threshold: 10    # HU threshold for foreground (above this is foreground)
+  foreground_threshold: 100    # HU threshold for foreground (above this is foreground)
   foreground_crop_prob: 1.0       # Probability of using foreground-biased cropping
-  min_foreground_ratio: 0.4       # Minimum foreground ratio required in crop
+  min_foreground_ratio: 0.5       # Minimum foreground ratio required in crop
 
 evaluation:
   eval_period_iterations: 0    # disable periodic eval

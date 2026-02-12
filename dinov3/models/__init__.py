@@ -19,6 +19,7 @@ from . import convnext
 logger = logging.getLogger("dinov3")
 
 
+
 def init_fp8(model: nn.Module, args) -> nn.Module:
     if not args.fp8_enabled:
         logger.info("fp8 matmuls: OFF (disabled in config)")
@@ -123,6 +124,22 @@ def build_model_for_eval(
     pretrained_weights: Union[str, Path] | None,
     shard_unsharded_model: bool = False,  # If the model is not sharded, shard it. No effect if already sharded on disk
 ):
+    def _detect_dcp_backbone_prefix(ckpt_dir: Path) -> str | None:
+        try:
+            import torch.distributed.checkpoint.filesystem as dcpfs
+
+            reader = dcpfs.FileSystemReader(ckpt_dir)
+            metadata = reader.read_metadata()
+            keys = metadata.state_dict_metadata.keys()
+            for prefix in ("teacher", "student", "model_ema"):
+                if any(k.startswith(f"model.{prefix}.backbone.") for k in keys):
+                    return prefix
+            if any(k.startswith("model.backbone.") for k in keys):
+                return "backbone"
+        except Exception:
+            logger.exception("Failed to inspect DCP metadata; falling back to default load path")
+        return None
+
     model, _ = build_model_from_cfg(config, only_teacher=True)
     if pretrained_weights is None or pretrained_weights == "":
         logger.info("No pretrained weights")
@@ -130,16 +147,27 @@ def build_model_for_eval(
     elif Path(pretrained_weights).is_dir():
         logger.info("PyTorch DCP checkpoint")
         from dinov3.checkpointer import load_checkpoint
-        from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 
-        moduledict = nn.ModuleDict({"backbone": model})
-        # Wrap with FSDP
-        ac_compile_parallelize(moduledict, inference_only_models=[], cfg=config)
-        # Move to CUDA
-        model.to_empty(device="cuda")
-        # Load checkpoint
-        load_checkpoint(pretrained_weights, model=moduledict, strict_loading=True)
-        shard_unsharded_model = False
+        dcp_prefix = _detect_dcp_backbone_prefix(Path(pretrained_weights))
+        if dcp_prefix in {"teacher", "student", "model_ema"}:
+            logger.info("Detected DCP backbone prefix: %s", dcp_prefix)
+            moduledict = nn.ModuleDict({dcp_prefix: nn.ModuleDict({"backbone": model})})
+            # Move to CUDA (works with meta initialization)
+            model.to_empty(device="cuda")
+            # Load checkpoint
+            load_checkpoint(pretrained_weights, model=moduledict, strict_loading=True)
+            shard_unsharded_model = False
+        else:
+            from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
+
+            moduledict = nn.ModuleDict({"backbone": model})
+            # Wrap with FSDP
+            ac_compile_parallelize(moduledict, inference_only_models=[], cfg=config)
+            # Move to CUDA
+            model.to_empty(device="cuda")
+            # Load checkpoint
+            load_checkpoint(pretrained_weights, model=moduledict, strict_loading=True)
+            shard_unsharded_model = False
     else:
         logger.info("PyTorch consolidated checkpoint")
         from dinov3.checkpointer import init_model_from_checkpoint_for_evals

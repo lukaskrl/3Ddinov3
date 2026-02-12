@@ -1,11 +1,14 @@
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple, Any
 import nibabel as nib
-
+import time
+import logging
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+logger = logging.getLogger("dinov3")
 
 
 class CTVolumeDataset(Dataset):
@@ -76,13 +79,19 @@ class CTVolumeDataset(Dataset):
         if not Path(path).is_file():
             raise FileNotFoundError(f"Volume file not found: {path}")
 
+        t_start = time.perf_counter()
+        file_type = Path(path).suffix
+        
         if path.endswith('.npy'):
             arr = np.load(path)
         else:
-
             nii = nib.load(path)
             arr = nii.get_fdata()
             arr = arr.astype(np.float32)
+
+        t_end = time.perf_counter()
+        load_time_ms = (t_end - t_start) * 1000
+        print(f"Loaded volume {path} in {load_time_ms:.2f} ms")
 
         # Accept (D, H, W) or (C, D, H, W). Convert to torch.FloatTensor.
         if arr.ndim == 3:
