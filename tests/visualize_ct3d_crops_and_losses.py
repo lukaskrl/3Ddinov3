@@ -14,6 +14,7 @@ Run from the repo root:
 import os
 import sys
 from pathlib import Path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 import numpy as np
@@ -23,8 +24,6 @@ import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
 
-# Allow imports from the repo when run as a script
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import dinov3.distributed as distributed
 from dinov3.configs import DinoV3SetupArgs, setup_config
@@ -102,7 +101,38 @@ def _build_single_sample_batch(cfg, aug, volume: torch.Tensor, disable_flips=Fal
     return batch, sample_dict
 
 
-def _visualize_crops(sample_dict, original_volume=None, show_original=False, foreground_threshold=None):
+def _overlay_patch_grid_2d(
+    ax: plt.Axes,
+    height: int,
+    width: int,
+    patch_h: int,
+    patch_w: int,
+    *,
+    color: str = "red",
+    alpha: float = 0.35,
+    linewidth: float = 0.5,
+) -> None:
+    if patch_h is None or patch_w is None or patch_h <= 0 or patch_w <= 0:
+        return
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xticks(np.arange(0, width + 1, patch_w), minor=True)
+    ax.set_yticks(np.arange(0, height + 1, patch_h), minor=True)
+    ax.set_axisbelow(False)
+    ax.grid(which="minor", color=color, alpha=alpha, linewidth=linewidth, zorder=10)
+    ax.tick_params(which="both", bottom=False, left=False, labelbottom=False, labelleft=False)
+    ax.set_frame_on(False)
+
+
+def _visualize_crops(
+    sample_dict,
+    original_volume=None,
+    show_original=False,
+    foreground_threshold=None,
+    patch_size_3d=None,
+):
     """
     Visualize a few slices from the global and local crops.
     Assumes C=1 (single-channel CT).
@@ -140,7 +170,7 @@ def _visualize_crops(sample_dict, original_volume=None, show_original=False, for
     if n_rows == 1:
         axes = np.expand_dims(axes, 0)
 
-    def _plot_volume(ax_row, vol, title_prefix):
+    def _plot_volume(ax_row, vol, title_prefix, patch_size):
         # vol: (C, D, H, W)
         vol_np = vol.detach().cpu().numpy() if isinstance(vol, torch.Tensor) else vol
         if vol_np.ndim == 4:
@@ -148,6 +178,11 @@ def _visualize_crops(sample_dict, original_volume=None, show_original=False, for
             vol_np = vol_np[0]  # Remove channel dim: (D, H, W)
         
         D, H, W = vol_np.shape
+
+        if patch_size is None:
+            D_p = H_p = W_p = None
+        else:
+            D_p, H_p, W_p = patch_size
 
         mid_d = D // 2
         mid_h = H // 2
@@ -162,12 +197,33 @@ def _visualize_crops(sample_dict, original_volume=None, show_original=False, for
         titles = [f"{title_prefix} axial", f"{title_prefix} coronal", f"{title_prefix} sagittal"]
 
         for ax, img, t in zip(ax_row, slices, titles):
-            ax.imshow(img, cmap="gray", origin="lower")  # origin='lower' for medical convention
+            ax.imshow(img, cmap="gray", origin="lower", zorder=0)  # origin='lower' for medical convention
             ax.set_title(t, fontsize=10)
-            ax.axis("off")
+            if t.endswith("axial"):
+                _overlay_patch_grid_2d(ax, img.shape[0], img.shape[1], H_p, W_p)
+            elif t.endswith("coronal"):
+                _overlay_patch_grid_2d(ax, img.shape[0], img.shape[1], D_p, W_p)
+            else:  # sagittal
+                _overlay_patch_grid_2d(ax, img.shape[0], img.shape[1], D_p, H_p)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_frame_on(False)
+
+        # plt.show()
+        # plt.imshow(vol_np[mid_d, :, :], cmap="gray", origin="lower")
+        # plt.axis("off")
+        # plt.show()
+
+        # plt.imshow(vol_np[:, mid_h, :], cmap="gray", origin="lower")    
+        # plt.axis("off")
+        # plt.show()
+
+        # plt.imshow(vol_np[:, :, mid_w], cmap="gray", origin="lower")
+        # plt.axis("off")
+        # plt.show()
 
     for row, (vol, label) in enumerate(zip(crops_to_plot, crop_labels)):
-        _plot_volume(axes[row], vol, label)
+        _plot_volume(axes[row], vol, label, patch_size_3d)
 
     if foreground_threshold is None:
         fg_title = "foreground_threshold: N/A"
@@ -181,6 +237,8 @@ def _visualize_crops(sample_dict, original_volume=None, show_original=False, for
     )
     plt.tight_layout()
     plt.show()
+    # show only original axial without patch or title
+
 
 
 def _summarize_crops(sample_dict):
@@ -476,14 +534,15 @@ if __name__ == "__main__":
         original_volume=volume,
         show_original=True,
         foreground_threshold=getattr(aug, "foreground_threshold", None),
+        patch_size_3d=tuple(cfg.crops.patch_size_3d),
     )
 
 
     # Print simple stats on crops
     _summarize_crops(sample_dict)
 
-    # --- Compute losses (DINO global/local + iBOT) for this one batch ---
 #%%
+    # --- Compute losses (DINO global/local + iBOT) for this one batch ---
     teacher_temp = cfg.teacher.teacher_temp
 
     loss, metrics = model.forward_backward(

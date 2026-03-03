@@ -91,7 +91,6 @@ class CTVolumeDataset(Dataset):
 
         t_end = time.perf_counter()
         load_time_ms = (t_end - t_start) * 1000
-        print(f"Loaded volume {path} in {load_time_ms:.2f} ms")
 
         # Accept (D, H, W) or (C, D, H, W). Convert to torch.FloatTensor.
         if arr.ndim == 3:

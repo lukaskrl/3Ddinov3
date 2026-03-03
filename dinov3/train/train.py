@@ -32,9 +32,11 @@ from dinov3.data import (
     MaskingGenerator,
     MaskingGenerator3D,
     SamplerType,
+    CropForegroundSwapSliceDims,
     collate_data_and_cast,
     make_data_loader,
     make_dataset,
+    make_dataset_3d,
     CombinedDataLoader,
 )
 from dinov3.logging import MetricLogger, setup_logging
@@ -327,6 +329,7 @@ def build_data_loader_from_cfg(
     batch_size = dataloader_batch_size_per_gpu
     num_workers = cfg.train.num_workers
     dataset_path = cfg.train.dataset_path
+
     dataset = make_dataset(
         dataset_str=dataset_path,
         transform=model.build_data_augmentation_dino(cfg),
@@ -666,6 +669,7 @@ def main(argv=None):
         raise ValueError(f"Unknown MODEL.META_ARCHITECTURE {cfg.MODEL.META_ARCHITECTURE}")
     logger.info(f"Making meta arch {meta_arch.__name__}")
     with torch.device("meta"):
+        print("cfg:", cfg)
         model = meta_arch(cfg)
     model.prepare_for_distributed_training()
     # Fill all values with `nans` so that we identify

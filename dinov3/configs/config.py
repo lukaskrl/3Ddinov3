@@ -38,7 +38,8 @@ class DinoV3SetupArgs:
 
 
 def apply_scaling_rules_to_cfg(cfg):  # to fix
-    assert distributed.is_enabled(), "Setup distributed to get global size !"
+    if not distributed.is_enabled():
+        logger.info("Distributed not enabled; using world size 1 for scaling rules.")
     if "schedules" in cfg:
         # For schedules v2, the scaling rules are applied when building the schedules, the config is not modified
         return cfg

@@ -12,7 +12,8 @@ from torch.utils.data import Sampler
 
 from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, Imagenette, NYU, CTVolumeDataset
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
-
+from monai.data import CacheNTransDataset, PersistentDataset
+import json
 logger = logging.getLogger("dinov3")
 
 
@@ -79,6 +80,7 @@ def _parse_dataset_str(dataset_str: str):
     elif name == "CTVolume":
         # 3D volumetric CT dataset backed by .npy volumes.
         class_ = CTVolumeDataset
+
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 
@@ -247,3 +249,39 @@ def make_data_loader(
     except TypeError:  # data loader has no length
         logger.info("infinite data loader")
     return data_loader
+
+
+
+def make_dataset_3d(
+    *,
+    dataset_path: str,
+    cache_path: str,
+    data_min_axis_size: int,
+    transform: Optional[Callable] = None,
+):
+    """
+    Creates a 3d input dataset with the specified parameters.
+
+    Args:
+        dataset_path: A path to a list of sample paths for MONAI datasets.
+        cache_path: A path to a directory to cache the dataset.
+        data_min_axis_size: The minimum size of the smallest axis of the data.
+        transform: A transform to apply to images.
+    Returns:
+        The created dataset.
+    """
+    logger.info(f'creating 3d dataset from datalist: {dataset_path}')
+
+    # load datalist
+    with open(dataset_path, 'r') as json_f:
+        datalist = json.load(json_f)
+
+    # filter overly small data
+    datalist = [x for x in datalist if min(x['shape'][:3]) > data_min_axis_size]
+    dataset = CacheNTransDataset(datalist, transform=transform, cache_n_trans=5, cache_dir=cache_path)
+
+    # Aggregated datasets do not expose (yet) these attributes, so add them.
+    if not hasattr(dataset, "transform"):
+        setattr(dataset, "transform", transform)
+
+    return dataset

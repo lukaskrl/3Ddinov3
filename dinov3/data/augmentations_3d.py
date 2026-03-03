@@ -87,9 +87,10 @@ class DataAugmentationDINO3D(object):
                 mode="trilinear",
                 align_corners=False,
             ).squeeze(0)  # (C, D', H', W')
-            
+
             # Create binary foreground mask
             fg_mask = (vol_down > self.foreground_threshold).float()  # (C, D', H', W')
+
             # Take max across channels if multi-channel
             fg_mask = fg_mask.max(dim=0, keepdim=True)[0]  # (1, D', H', W')
             
@@ -134,6 +135,31 @@ class DataAugmentationDINO3D(object):
         log_ratio_low, log_ratio_high = np.log(ratio[0]), np.log(ratio[1])
         volume_total = D * H * W
 
+        def _fg_ratio(sd: int, sh: int, sw: int, cd: int, ch: int, cw: int) -> float:
+            if fg_map is None:
+                return 0.0
+            fg_d, fg_h, fg_w = fg_map.shape[1:]
+            scale_d = D / fg_d
+            scale_h = H / fg_h
+            scale_w = W / fg_w
+
+            d0 = int(np.floor(sd / scale_d))
+            h0 = int(np.floor(sh / scale_h))
+            w0 = int(np.floor(sw / scale_w))
+            d1 = int(np.ceil((sd + cd) / scale_d))
+            h1 = int(np.ceil((sh + ch) / scale_h))
+            w1 = int(np.ceil((sw + cw) / scale_w))
+
+            d0 = np.clip(d0, 0, fg_d)
+            h0 = np.clip(h0, 0, fg_h)
+            w0 = np.clip(w0, 0, fg_w)
+            d1 = np.clip(d1, d0 + 1, fg_d)
+            h1 = np.clip(h1, h0 + 1, fg_h)
+            w1 = np.clip(w1, w0 + 1, fg_w)
+
+            patch = fg_map[:, d0:d1, h0:h1, w0:w1]
+            return float(patch.mean().item()) if patch.numel() > 0 else 0.0
+
         def _attempt():
             # target volume sampled uniformly in scale range (matches torchvision RandomResizedCrop)
             target_vol = float(np.random.uniform(scale[0], scale[1]) * volume_total)
@@ -151,64 +177,77 @@ class DataAugmentationDINO3D(object):
             w = max(1, int(round(h / r_hw)))
             return d, h, w
 
-        # Try multiple times to find a valid crop size
-        for _ in range(10):
-            cd, ch, cw = _attempt()
-            if cd <= D and ch <= H and cw <= W:
+        best = None
+        best_ratio = -1.0
+
+        for _ in range(20):
+            # Try multiple times to find a valid crop size
+            for _ in range(10):
+                cd, ch, cw = _attempt()
+                if cd <= D and ch <= H and cw <= W:
+                    break
+            else:
+                min_d = min(D, H, W)
+                cd = ch = cw = min_d
+
+            # Sample crop position - use foreground map to bias sampling if available
+            if use_foreground and fg_map is not None:
+                fg_d, fg_h, fg_w = fg_map.shape[1:]
+
+                fg_probs = fg_map.squeeze(0).flatten()
+                fg_probs = fg_probs + 0.1
+                fg_probs = fg_probs / fg_probs.sum()
+
+                idx = torch.multinomial(fg_probs, 1).item()
+                fg_d_idx = idx // (fg_h * fg_w)
+                fg_h_idx = (idx % (fg_h * fg_w)) // fg_w
+                fg_w_idx = idx % fg_w
+
+                scale_d = D / fg_d
+                scale_h = H / fg_h
+                scale_w = W / fg_w
+
+                center_d = int((fg_d_idx + 0.5) * scale_d)
+                center_h = int((fg_h_idx + 0.5) * scale_h)
+                center_w = int((fg_w_idx + 0.5) * scale_w)
+
+                jitter_d = np.random.randint(-cd // 4, cd // 4 + 1) if cd > 4 else 0
+                jitter_h = np.random.randint(-ch // 4, ch // 4 + 1) if ch > 4 else 0
+                jitter_w = np.random.randint(-cw // 4, cw // 4 + 1) if cw > 4 else 0
+
+                center_d = np.clip(center_d + jitter_d, cd // 2, D - cd // 2)
+                center_h = np.clip(center_h + jitter_h, ch // 2, H - ch // 2)
+                center_w = np.clip(center_w + jitter_w, cw // 2, W - cw // 2)
+
+                sd = center_d - cd // 2
+                sh = center_h - ch // 2
+                sw = center_w - cw // 2
+
+                sd = np.clip(sd, 0, max(0, D - cd))
+                sh = np.clip(sh, 0, max(0, H - ch))
+                sw = np.clip(sw, 0, max(0, W - cw))
+            else:
+                sd = np.random.randint(0, D - cd + 1) if cd < D else 0
+                sh = np.random.randint(0, H - ch + 1) if ch < H else 0
+                sw = np.random.randint(0, W - cw + 1) if cw < W else 0
+
+            if use_foreground and fg_map is not None and self.min_foreground_ratio > 0:
+                fg_ratio = _fg_ratio(sd, sh, sw, cd, ch, cw)
+                if fg_ratio > best_ratio:
+                    best_ratio = fg_ratio
+                    best = (sd, sh, sw, cd, ch, cw)
+                if fg_ratio >= self.min_foreground_ratio:
+                    break
+            else:
+                best = (sd, sh, sw, cd, ch, cw)
                 break
-        else:
-            # Fallback: central crop with minimal dimension
+
+        if best is None:
             min_d = min(D, H, W)
+            sd = sh = sw = 0
             cd = ch = cw = min_d
-        
-        # Sample crop position - use foreground map to bias sampling if available
-        if use_foreground and fg_map is not None:
-            # Use foreground map to bias crop center selection
-            fg_d, fg_h, fg_w = fg_map.shape[1:]
-            
-            # Convert foreground map to sampling probabilities
-            fg_probs = fg_map.squeeze(0).flatten()  # (D'*H'*W',)
-            fg_probs = fg_probs + 0.1  # Add small uniform component so all positions possible
-            fg_probs = fg_probs / fg_probs.sum()
-            
-            # Sample a foreground position in downsampled space
-            idx = torch.multinomial(fg_probs, 1).item()
-            fg_d_idx = idx // (fg_h * fg_w)
-            fg_h_idx = (idx % (fg_h * fg_w)) // fg_w
-            fg_w_idx = idx % fg_w
-            
-            # Map back to original resolution and add some jitter
-            scale_d = D / fg_d
-            scale_h = H / fg_h
-            scale_w = W / fg_w
-            
-            center_d = int((fg_d_idx + 0.5) * scale_d)
-            center_h = int((fg_h_idx + 0.5) * scale_h)
-            center_w = int((fg_w_idx + 0.5) * scale_w)
-            
-            # Add small random jitter (within half crop size)
-            jitter_d = np.random.randint(-cd // 4, cd // 4 + 1) if cd > 4 else 0
-            jitter_h = np.random.randint(-ch // 4, ch // 4 + 1) if ch > 4 else 0
-            jitter_w = np.random.randint(-cw // 4, cw // 4 + 1) if cw > 4 else 0
-            
-            center_d = np.clip(center_d + jitter_d, cd // 2, D - cd // 2)
-            center_h = np.clip(center_h + jitter_h, ch // 2, H - ch // 2)
-            center_w = np.clip(center_w + jitter_w, cw // 2, W - cw // 2)
-            
-            # Convert center to top-left corner
-            sd = center_d - cd // 2
-            sh = center_h - ch // 2
-            sw = center_w - cw // 2
-            
-            # Ensure within bounds
-            sd = np.clip(sd, 0, max(0, D - cd))
-            sh = np.clip(sh, 0, max(0, H - ch))
-            sw = np.clip(sw, 0, max(0, W - cw))
         else:
-            # Uniform random sampling (default behavior)
-            sd = np.random.randint(0, D - cd + 1) if cd < D else 0
-            sh = np.random.randint(0, H - ch + 1) if ch < H else 0
-            sw = np.random.randint(0, W - cw + 1) if cw < W else 0
+            sd, sh, sw, cd, ch, cw = best
         
         # Extract variable-size crop
         cropped = volume[:, sd : sd + cd, sh : sh + ch, sw : sw + cw]
@@ -256,6 +295,7 @@ class DataAugmentationDINO3D(object):
             use_foreground=use_fg_crop,
             fg_map=fg_map,
         )
+        # print the min max mean and std of each crop for debugging
         g1 = self._maybe_flip(g1)
 
         g2, g2_offset = self._random_3d_crop(
@@ -355,7 +395,7 @@ class DataAugmentationDINO3DMonai(object):
         * "global_crops_teacher"  : list[Tensor]
         * "local_crops"           : list[Tensor]
         * "gram_teacher_crops"    : optional list[Tensor]
-        * "offsets"               : () for now (no patch-aligned offsets)
+        * "offsets"               : patch-aligned offsets when local crops are subsets
     """
 
     def __init__(
@@ -408,6 +448,14 @@ class DataAugmentationDINO3DMonai(object):
         # 2) Optionally apply per-channel mean/std with NormalizeIntensityd
         ct_min, ct_max = ct_window
         intensity_transforms: List[monai.transforms.Transform] = [
+            t.CastToTyped(
+                keys=["img"],
+                dtype=torch.float32,
+            ),
+            t.EnsureTyped(
+                keys=["img"],
+                track_meta=False,
+            ),
             t.ScaleIntensityRanged(
                 keys=["img"],
                 a_min=ct_min,
@@ -428,17 +476,23 @@ class DataAugmentationDINO3DMonai(object):
             )
         self._intensity = t.Compose(intensity_transforms)
 
-        # Global crops pipeline: random resized crop using scale + optional flip.
+        # --- Global crops (mirror 2D: crop at max size, then resize to global / gram sizes) ---
+        if self.gram_teacher_crops_size_3d is not None:
+            self.global_crop_max_size_3d = tuple(
+                max(g, t) for g, t in zip(self.global_crops_size_3d, self.gram_teacher_crops_size_3d)
+            )
+        else:
+            self.global_crop_max_size_3d = self.global_crops_size_3d
+
         global_spatial = [
             RandResizedCrop3Dd(
                 keys=["img"],
-                roi_size=self.global_crops_size_3d,
+                roi_size=self.global_crop_max_size_3d,
                 scale=self.global_crops_scale,
                 ratio=self.ratio_3d,
             ),
         ]
         if self.horizontal_flips:
-            # Treat the last spatial axis as "horizontal" by convention.
             global_spatial.append(
                 t.RandFlipd(
                     keys=["img"],
@@ -446,9 +500,37 @@ class DataAugmentationDINO3DMonai(object):
                     spatial_axis=-1,
                 )
             )
-        self.global_transform = t.Compose(global_spatial + [self._intensity])
+        self.geometric_augmentation_global = t.Compose(global_spatial)
 
-        # Local crops pipeline: analogous but with local crop size + local scale.
+        self.resize_global_pre = None
+        self.resize_global_post = None
+        self.resize_gram_teacher = None
+        if self.gram_teacher_crops_size_3d is not None:
+            if self.gram_teacher_no_distortions:
+                # Resize before intensity transforms so gram crop is distortion-free
+                self.resize_global_pre = t.Resized(
+                    keys=["img"],
+                    spatial_size=self.global_crops_size_3d,
+                    mode="trilinear",
+                    align_corners=False,
+                )
+            else:
+                # Resize after intensity transforms to share distortions
+                self.resize_global_post = t.Resized(
+                    keys=["img"],
+                    spatial_size=self.global_crops_size_3d,
+                    mode="trilinear",
+                    align_corners=False,
+                )
+
+            self.resize_gram_teacher = t.Resized(
+                keys=["img"],
+                spatial_size=self.gram_teacher_crops_size_3d,
+                mode="trilinear",
+                align_corners=False,
+            )
+
+        # Local crops pipeline: random resized crop using local scale.
         local_spatial = [
             RandResizedCrop3Dd(
                 keys=["img"],
@@ -467,27 +549,172 @@ class DataAugmentationDINO3DMonai(object):
             )
         self.local_transform = t.Compose(local_spatial + [self._intensity])
 
-        # Gram-teacher pipeline: potentially lighter / distortion-free if requested.
-        if self.gram_teacher_crops_size_3d is not None:
-            gram_spatial = [
-                RandResizedCrop3Dd(
-                    keys=["img"],
-                    roi_size=self.gram_teacher_crops_size_3d,
-                    scale=self.global_crops_scale,
-                    ratio=self.ratio_3d,
-                ),
-            ]
-            if not self.gram_teacher_no_distortions and self.horizontal_flips:
-                gram_spatial.append(
-                    t.RandFlipd(
-                        keys=["img"],
-                        prob=0.5,
-                        spatial_axis=-1,
-                    )
-                )
-            self.gram_transform = t.Compose(gram_spatial + [self._intensity])
+        # Local transform without spatial cropping (used when local crops are subsets of global crops).
+        self.local_transform_no_spatial = self._intensity
+
+    def _apply_optional(self, transform, data: Dict[str, Any]) -> Dict[str, Any]:
+        return transform(data) if transform is not None else data
+
+    def _compute_foreground_map(
+        self, volume: torch.Tensor, downsample_factor: int = 8
+    ) -> Optional[torch.Tensor]:
+        if self.foreground_threshold is None:
+            return None
+
+        with torch.no_grad():
+            _, D, H, W = volume.shape
+            D_down = max(1, D // downsample_factor)
+            H_down = max(1, H // downsample_factor)
+            W_down = max(1, W // downsample_factor)
+
+            vol_down = torch.nn.functional.interpolate(
+                volume.unsqueeze(0),
+                size=(D_down, H_down, W_down),
+                mode="trilinear",
+                align_corners=False,
+            ).squeeze(0)
+
+            fg_mask = (vol_down > self.foreground_threshold).float()
+            fg_mask = fg_mask.max(dim=0, keepdim=True)[0]
+
+        return fg_mask
+
+    def _random_3d_crop(
+        self,
+        volume: torch.Tensor,
+        out_size: Tuple[int, int, int],
+        scale: Tuple[float, float],
+        ratio: Optional[Tuple[float, float]] = None,
+        use_foreground: bool = False,
+        fg_map: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Tuple[int, int, int]]:
+        assert volume.ndim == 4
+        _, D, H, W = volume.shape
+        ratio = ratio if ratio is not None else self.ratio_3d
+        log_ratio_low, log_ratio_high = np.log(ratio[0]), np.log(ratio[1])
+        volume_total = D * H * W
+
+        def _fg_ratio(sd: int, sh: int, sw: int, cd: int, ch: int, cw: int) -> float:
+            if fg_map is None:
+                return 0.0
+            fg_d, fg_h, fg_w = fg_map.shape[1:]
+            scale_d = D / fg_d
+            scale_h = H / fg_h
+            scale_w = W / fg_w
+
+            d0 = int(np.floor(sd / scale_d))
+            h0 = int(np.floor(sh / scale_h))
+            w0 = int(np.floor(sw / scale_w))
+            d1 = int(np.ceil((sd + cd) / scale_d))
+            h1 = int(np.ceil((sh + ch) / scale_h))
+            w1 = int(np.ceil((sw + cw) / scale_w))
+
+            d0 = np.clip(d0, 0, fg_d)
+            h0 = np.clip(h0, 0, fg_h)
+            w0 = np.clip(w0, 0, fg_w)
+            d1 = np.clip(d1, d0 + 1, fg_d)
+            h1 = np.clip(h1, h0 + 1, fg_h)
+            w1 = np.clip(w1, w0 + 1, fg_w)
+
+            patch = fg_map[:, d0:d1, h0:h1, w0:w1]
+            return float(patch.mean().item()) if patch.numel() > 0 else 0.0
+
+        def _attempt():
+            target_vol = float(np.random.uniform(scale[0], scale[1]) * volume_total)
+            log_r_dh = float(np.random.uniform(log_ratio_low, log_ratio_high))
+            log_r_hw = float(np.random.uniform(log_ratio_low, log_ratio_high))
+            r_dh = np.exp(log_r_dh)
+            r_hw = np.exp(log_r_hw)
+            h = max(1, int(round((target_vol / (r_dh * r_hw)) ** (1.0 / 3.0))))
+            d = max(1, int(round(r_dh * h)))
+            w = max(1, int(round(h / r_hw)))
+            return d, h, w
+
+        best = None
+        best_ratio = -1.0
+
+        for _ in range(20):
+            for _ in range(10):
+                cd, ch, cw = _attempt()
+                if cd <= D and ch <= H and cw <= W:
+                    break
+            else:
+                min_d = min(D, H, W)
+                cd = ch = cw = min_d
+
+            if use_foreground and fg_map is not None:
+                fg_d, fg_h, fg_w = fg_map.shape[1:]
+                fg_probs = fg_map.squeeze(0).flatten()
+                fg_probs = fg_probs + 0.1
+                fg_probs = fg_probs / fg_probs.sum()
+                idx = torch.multinomial(fg_probs, 1).item()
+                fg_d_idx = idx // (fg_h * fg_w)
+                fg_h_idx = (idx % (fg_h * fg_w)) // fg_w
+                fg_w_idx = idx % fg_w
+
+                scale_d = D / fg_d
+                scale_h = H / fg_h
+                scale_w = W / fg_w
+
+                center_d = int((fg_d_idx + 0.5) * scale_d)
+                center_h = int((fg_h_idx + 0.5) * scale_h)
+                center_w = int((fg_w_idx + 0.5) * scale_w)
+
+                jitter_d = np.random.randint(-cd // 4, cd // 4 + 1) if cd > 4 else 0
+                jitter_h = np.random.randint(-ch // 4, ch // 4 + 1) if ch > 4 else 0
+                jitter_w = np.random.randint(-cw // 4, cw // 4 + 1) if cw > 4 else 0
+
+                center_d = np.clip(center_d + jitter_d, cd // 2, D - cd // 2)
+                center_h = np.clip(center_h + jitter_h, ch // 2, H - ch // 2)
+                center_w = np.clip(center_w + jitter_w, cw // 2, W - cw // 2)
+
+                sd = center_d - cd // 2
+                sh = center_h - ch // 2
+                sw = center_w - cw // 2
+
+                sd = np.clip(sd, 0, max(0, D - cd))
+                sh = np.clip(sh, 0, max(0, H - ch))
+                sw = np.clip(sw, 0, max(0, W - cw))
+            else:
+                sd = np.random.randint(0, D - cd + 1) if cd < D else 0
+                sh = np.random.randint(0, H - ch + 1) if ch < H else 0
+                sw = np.random.randint(0, W - cw + 1) if cw < W else 0
+
+            if use_foreground and fg_map is not None and self.min_foreground_ratio > 0:
+                fg_ratio = _fg_ratio(sd, sh, sw, cd, ch, cw)
+                if fg_ratio > best_ratio:
+                    best_ratio = fg_ratio
+                    best = (sd, sh, sw, cd, ch, cw)
+                if fg_ratio >= self.min_foreground_ratio:
+                    break
+            else:
+                best = (sd, sh, sw, cd, ch, cw)
+                break
+
+        if best is None:
+            min_d = min(D, H, W)
+            sd = sh = sw = 0
+            cd = ch = cw = min_d
         else:
-            self.gram_transform = None
+            sd, sh, sw, cd, ch, cw = best
+
+        cropped = volume[:, sd : sd + cd, sh : sh + ch, sw : sw + cw]
+        if cropped.shape[1:] != out_size:
+            cropped = torch.nn.functional.interpolate(
+                cropped.unsqueeze(0),
+                size=out_size,
+                mode="trilinear",
+                align_corners=False,
+            ).squeeze(0)
+        assert cropped.shape[1:] == out_size, f"Expected {out_size}, got {cropped.shape[1:]}"
+        return cropped, (sd, sh, sw)
+
+    def _maybe_flip(self, volume: torch.Tensor) -> torch.Tensor:
+        if not self.horizontal_flips:
+            return volume
+        if np.random.rand() < 0.5:
+            volume = torch.flip(volume, dims=(-1,))
+        return volume
 
     def __call__(self, volume: torch.Tensor) -> Dict[str, Any]:
         """
@@ -501,33 +728,104 @@ class DataAugmentationDINO3DMonai(object):
         output: Dict[str, Any] = {}
         output["weak_flag"] = True
 
+        use_fg_crop = (
+            self.foreground_threshold is not None
+            and np.random.rand() < self.foreground_crop_prob
+        )
+        fg_map = self._compute_foreground_map(volume) if use_fg_crop else None
+
         # Global crops (2 views).
         data = {"img": volume}
-        g1_dict = self.global_transform(data)
-        g2_dict = self.global_transform(data)
+        if use_fg_crop:
+            g1_base, _ = self._random_3d_crop(
+                volume,
+                out_size=self.global_crop_max_size_3d,
+                scale=self.global_crops_scale,
+                use_foreground=True,
+                fg_map=fg_map,
+            )
+            g2_base, _ = self._random_3d_crop(
+                volume,
+                out_size=self.global_crop_max_size_3d,
+                scale=self.global_crops_scale,
+                use_foreground=True,
+                fg_map=fg_map,
+            )
+            g1_base = self._maybe_flip(g1_base)
+            g2_base = self._maybe_flip(g2_base)
+            im1_base = {"img": g1_base}
+            im2_base = {"img": g2_base}
+        else:
+            im1_base = self.geometric_augmentation_global(data)
+            im2_base = self.geometric_augmentation_global(data)
+
+        g1_transf = self._apply_optional(self.resize_global_pre, im1_base)
+        g1_transf = self._intensity(g1_transf)
+        g1_dict = self._apply_optional(self.resize_global_post, g1_transf)
         g1 = g1_dict["img"]
+
+        g2_transf = self._apply_optional(self.resize_global_pre, im2_base)
+        g2_transf = self._intensity(g2_transf)
+        g2_dict = self._apply_optional(self.resize_global_post, g2_transf)
         g2 = g2_dict["img"]
 
         output["global_crops"] = [g1, g2]
-        # For now, teacher sees the same crops/normalization; can be made lighter later.
         output["global_crops_teacher"] = [g1, g2]
 
         # Gram-teacher crops, if enabled.
-        if self.gram_transform is not None:
-            gt1 = self.gram_transform(data)["img"]
-            gt2 = self.gram_transform(data)["img"]
+        if self.gram_teacher_crops_size_3d is not None and self.resize_gram_teacher is not None:
+            if self.gram_teacher_no_distortions:
+                gt1 = self._intensity(self.resize_gram_teacher(im1_base))["img"]
+                gt2 = self._intensity(self.resize_gram_teacher(im2_base))["img"]
+            else:
+                gt1 = self.resize_gram_teacher(g1_transf)["img"]
+                gt2 = self.resize_gram_teacher(g2_transf)["img"]
             output["gram_teacher_crops"] = [gt1, gt2]
 
         # Local crops.
         local_crops: List[torch.Tensor] = []
-        # NOTE: MONAI transforms don't expose crop coordinates directly;
-        # for now, we don't return offsets (same as the non-subset path
-        # in the original 3D augmentation).
-        for _ in range(self.local_crops_number):
-            lc_dict = self.local_transform(data)
-            local_crops.append(lc_dict["img"])
+        local_offsets: List[Tuple[int, int, int]] = []
+
+        if self.local_crops_subset_of_global_crops:
+            base_volumes = [im1_base] * (self.local_crops_number // 2) + [im2_base] * (
+                self.local_crops_number - self.local_crops_number // 2
+            )
+            gs_d, gs_h, gs_w = self.global_crops_size_3d
+            ls_d, ls_h, ls_w = self.local_crops_size_3d
+            pd, ph, pw = self.patch_size_3d
+
+            for base in base_volumes:
+                base_dict = self.local_transform_no_spatial(base)
+                img = base_dict["img"]
+
+                max_d = max((gs_d - ls_d) // pd, 0)
+                max_h = max((gs_h - ls_h) // ph, 0)
+                max_w = max((gs_w - ls_w) // pw, 0)
+                rd = np.random.randint(0, max_d + 1) * pd if max_d > 0 else 0
+                rh = np.random.randint(0, max_h + 1) * ph if max_h > 0 else 0
+                rw = np.random.randint(0, max_w + 1) * pw if max_w > 0 else 0
+
+                crop = img[:, rd : rd + ls_d, rh : rh + ls_h, rw : rw + ls_w]
+                local_crops.append(crop)
+                local_offsets.append((rd, rh, rw))
+        else:
+            for _ in range(self.local_crops_number):
+                if use_fg_crop:
+                    lc, _ = self._random_3d_crop(
+                        volume,
+                        out_size=self.local_crops_size_3d,
+                        scale=self.local_crops_scale,
+                        use_foreground=True,
+                        fg_map=fg_map,
+                    )
+                    lc = self._maybe_flip(lc)
+                    lc_dict = self._intensity({"img": lc})
+                    local_crops.append(lc_dict["img"])
+                else:
+                    lc_dict = self.local_transform(data)
+                    local_crops.append(lc_dict["img"])
 
         output["local_crops"] = local_crops
-        output["offsets"] = ()  # no patch-aligned offsets from MONAI crops (yet)
+        output["offsets"] = local_offsets if self.local_crops_subset_of_global_crops else ()
 
         return output

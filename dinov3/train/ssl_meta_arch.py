@@ -14,7 +14,7 @@ from torch import Tensor, nn
 import dinov3.distributed as distributed
 from dinov3.checkpointer import init_fsdp_model_from_checkpoint
 from dinov3.configs import get_default_config
-from dinov3.data import DataAugmentationDINO, DataAugmentationDINO3D
+from dinov3.data import DataAugmentationDINO, DataAugmentationDINO3D, DataAugmentationDINO3DMonai
 from dinov3.fsdp.ac_compile_parallelize import ac_compile_parallelize
 from dinov3.layers.dino_head import DINOHead
 from dinov3.loss import DINOLoss, GramLoss, KoLeoLoss, KoLeoLossDistributed, iBOTPatchLoss

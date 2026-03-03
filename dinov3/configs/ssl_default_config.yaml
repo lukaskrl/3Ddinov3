@@ -173,6 +173,8 @@ crops:
   teacher_to_student_resolution_scale: 1.0
   # 3D CT‑specific augmentation options (used when use_3d_augmentation is true)
   use_3d_augmentation: false
+  # If true, use MONAI dict-based 3D dataloading + MONAI 3D augmentation path.
+  monai: false
   # Crop sizes are (D, H, W) in voxels
   global_crops_size_3d:
   - 64

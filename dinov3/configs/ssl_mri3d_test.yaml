@@ -77,14 +77,15 @@ gram:
   loss_weight_schedule: null
 
 train:
-  batch_size_per_gpu: 96  # smaller for 3D memory footprint / testing
+  batch_size_per_gpu: 1   # smaller for 3D memory footprint / testing
   gradient_accumulation_steps: 1  # Number of micro-batches to accumulate before each optimizer step
-  dataset_path: CTVolume:root=/home/lukas/data/brain-t1-dataset
+  dataset_path: /home/lukas/data/braint1.json
   data_config: null
   output_dir: ./work_dir/sanity_check
+  cache_dir: ./work_dir/cache
   saveckp_freq: 20
   seed: 0
-  num_workers: 16
+  num_workers: 0
   OFFICIAL_EPOCH_LENGTH: 1000   # shorter for quick tests
   monitor_gradient_norm: true
   chunk_schedule: []
@@ -98,6 +99,7 @@ train:
   cudagraphs: false
   sharded_eval_checkpoint: false
   cache_dataset: true
+  data_min_axis_size: 24
 
 student:
   arch: vit3d_large
@@ -176,45 +178,45 @@ optim:
 
 crops:
   local_crops_number: 8
-  global_crops_scale:
-    - 0.05
-    - 0.5
-  local_crops_scale:
-    - 0.001
-    - 0.05
+  global_crops_in_slice_scale:
+  - 0.48
+  - 1.0
+  global_crops_cross_slice_scale:
+  - 0.5
+  - 1.0
+  local_crops_in_slice_scale:
+  - 0.16  # 1/10th edge length for in-slice
+  - 0.48  # ~1/2 edge length for in-slice
+  local_crops_cross_slice_scale:
+  - 0.2  # 1/10th edge length for cross-slice
+  - 0.5  # 1/2 edge length for cross-slice
   global_local_crop_pairs_ratios: 1.0
-  localcrops_subset_of_globalcrops: true
+  localcrops_subset_of_globalcrops: false
   horizontal_flips: false
   gram_teacher_no_distortions: false
 
   # 3D CT‑specific options (only these are used in this config)
-  use_3d_augmentation: true
+  # use_3d_augmentation: true
   # (D, H, W) in voxels for global crops
-  global_crops_size_3d:
-    - 96
-    - 96
-    - 96
-  local_crops_size_3d:
-    - 48
-    - 48
-    - 48
+  global_crops_size: 96
+  local_crops_size: 48
   # When using ema_teacher=True for Gram, we reuse the student/teacher global crops
   # so no separate Gram teacher crop size is needed.
   gram_teacher_crops_size_3d: null
-  patch_size_3d:
-    - 16     # depth
-    - 16    # height
-    - 16   # width
-  ct_window:
-    - 0
-    - 1000
-  ct_mean: null
-  ct_std: null
+  # patch_size_3d:
+  #   - 16     # depth
+  #   - 16    # height
+  #   - 16   # width
+  # ct_window:
+  #   - 0
+  #   - 1000
+  # ct_mean: null
+  # ct_std: null
 
-  # Foreground cropping parameters
-  foreground_threshold: 100    # HU threshold for foreground (above this is foreground)
-  foreground_crop_prob: 1.0       # Probability of using foreground-biased cropping
-  min_foreground_ratio: 0.5       # Minimum foreground ratio required in crop
+  # # Foreground cropping parameters
+  # foreground_threshold: 100    # HU threshold for foreground (above this is foreground)
+  # foreground_crop_prob: 1.0       # Probability of using foreground-biased cropping
+  # min_foreground_ratio: 0.5       # Minimum foreground ratio required in crop
 
 evaluation:
   eval_period_iterations: 0    # disable periodic eval

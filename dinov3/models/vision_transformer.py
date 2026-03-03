@@ -496,6 +496,7 @@ class DinoVisionTransformer3D(nn.Module):
         x = x.reshape(B, Dp * Hp * Wp, -1)  # (B, N, C)
 
         if masks is not None:
+
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x)
             cls_token = self.cls_token
         else:
@@ -738,7 +739,7 @@ def vit_7b(patch_size=16, **kwargs):
     return model
 
 
-def vit3d_base(patch_size=16, patch_size_d=2, **kwargs):
+def vit3d_base(patch_size=16, patch_size_d=16, **kwargs):
     model = DinoVisionTransformer3D(
         patch_size=patch_size,
         patch_size_d=patch_size_d,
@@ -751,13 +752,13 @@ def vit3d_base(patch_size=16, patch_size_d=2, **kwargs):
     return model
 
 
-def vit3d_large(patch_size=16, patch_size_d=2, **kwargs):
+def vit3d_large(patch_size=16, patch_size_d=16, **kwargs):
     model = DinoVisionTransformer3D(
         patch_size=patch_size,
         patch_size_d=patch_size_d,
-        embed_dim=960,
+        embed_dim=1080,
         depth=24,
-        num_heads=16,
+        num_heads=18,
         ffn_ratio=4,
         **kwargs,
     )

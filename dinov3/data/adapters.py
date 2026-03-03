@@ -66,3 +66,17 @@ class DatasetWithEnumeratedTargets(Dataset):
 
     def __len__(self) -> int:
         return self._padded_size
+
+class DictDatasetWithEnumeratedTargets(Dataset):
+    def __init__(self, dataset):
+        self._dataset = dataset
+
+    def __getitem__(self, index: int) -> Tuple[Any, Tuple[Any, int]]:
+        data_dict = self._dataset[index]
+        image = data_dict["image"]
+        target = data_dict.get("label", None)
+        target = index if target is None else target
+        return image, (index, target)
+
+    def __len__(self) -> int:
+        return len(self._dataset)

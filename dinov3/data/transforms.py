@@ -11,6 +11,28 @@ from torchvision.transforms import v2
 
 logger = logging.getLogger("dinov3")
 
+from monai.transforms import (
+    Compose,
+    CropForegroundd,
+    LoadImaged,
+    Orientationd,
+    RandFlipd,
+    RandShiftIntensityd,
+    ScaleIntensityRangePercentilesd,
+    EnsureTyped,
+    Resized,
+    RandScaleIntensityd,
+    RandAdjustContrastd,
+    RandSpatialCropd,
+    CenterSpatialCropd,
+    Identityd,
+    OneOf,
+    RandGaussianNoised,
+    RandGaussianSmoothd,
+    RandGaussianSharpend,
+    Lambdad
+)
+from torchio.transforms import RandomAffine
 
 def make_interpolation_mode(mode_str: str) -> v2.InterpolationMode:
     return {mode.value: mode for mode in v2.InterpolationMode}[mode_str]
