@@ -10,13 +10,13 @@ compute_precision:
 dino:
   loss_weight: 1.0
   global_ignore_diagonal: true
-  head_n_prototypes: 65536
+  head_n_prototypes: 16384
   head_bottleneck_dim: 256
   head_norm_last_layer: true
   head_nlayers: 3
   head_hidden_dim: 2048
   koleo_loss_weight: 0.1
-  koleo_loss_distributed: true
+  koleo_loss_distributed: false
   koleo_topk: 1
   koleo_distributed_replicas: 0
   koleo_distributed_loss_group_size: null
@@ -34,12 +34,12 @@ ibot:
   loss_weight: 1
   mask_sample_probability: 0.5
   mask_ratio_min_max:
-  - 0.2
-  - 0.75
+  - 0.1
+  - 0.5
   mask_random_circular_shift: false
   force_masking_even_with_zero_weight: false
   separate_head: true
-  head_n_prototypes: 65536
+  head_n_prototypes: 16384
   head_bottleneck_dim: 256
   head_norm_last_layer: false
   head_nlayers: 3
@@ -64,33 +64,31 @@ gram:
   global_teacher_resize_antialias: false
   loss_weight_schedule: null
 train:
-  batch_size_per_gpu: 96
+  batch_size_per_gpu: 16
   gradient_accumulation_steps: 1
-  dataset_path: /home/lukas/data/braint1.json
+  dataset_path: CTVolume:root=/home/lukas/data/brain-t1-dataset
   data_config: null
-  output_dir: ./work_dir/sanity_check
+  output_dir: /home/lukas/3Ddinov3/work_dir/mri_full_training_centering
   saveckp_freq: 20
   seed: 0
-  num_workers: 32
+  num_workers: 2
   OFFICIAL_EPOCH_LENGTH: 1000
   monitor_gradient_norm: true
   chunk_schedule: []
   use_teacher_head: true
   learn_from_teacher_tokens: false
-  centering: sinkhorn_knopp
+  centering: centering
   checkpointing: false
   checkpointing_full: false
   compile: true
   cudagraphs: false
   sharded_eval_checkpoint: false
   cache_dataset: true
-  data_min_axis_size: 24
-  cache_dir: ./cache
 student:
   arch: vit3d_large
   patch_size: 16
-  drop_path_rate: 0.3
-  layerscale: 1.0e-05
+  drop_path_rate: 0.4
+  layerscale: 0.1
   pretrained_weights: ''
   ffn_layer: swiglu64
   ffn_ratio: 4.0
@@ -133,7 +131,7 @@ hrft:
   enabled: false
   checkpoint_path: ''
 optim:
-  epochs: 1000
+  epochs: 5000
   optimizer: adamw
   weight_decay: null
   weight_decay_end: null
@@ -141,29 +139,29 @@ optim:
   warmup_epochs: null
   min_lr: null
   schedule_trunc_extra: null
-  clip_grad: 3.0
-  freeze_last_layer_epochs: 1
+  clip_grad: 30.0
+  freeze_last_layer_epochs: 5
   scaling_rule: sqrt_wrt_1024
   patch_embed_lr_mult: 0.2
   dino_head_wd_multiplier: 1.0
-  layerwise_decay: 0.9
+  layerwise_decay: 0.98
   multi_tensor_optim: true
   dump_fsdp_weights_path: ''
   adamw_beta1: 0.9
-  adamw_beta2: 0.999
+  adamw_beta2: 0.99
 crops:
   global_crops_scale:
   - 0.05
-  - 0.5
+  - 0.15
   local_crops_number: 8
   local_crops_scale:
   - 0.001
   - 0.05
-  global_crops_size: 96
-  local_crops_size: 48
+  global_crops_size: 224
+  local_crops_size: 96
   global_local_crop_pairs_ratios: 1.0
   gram_teacher_crops_size: null
-  localcrops_subset_of_globalcrops: true
+  localcrops_subset_of_globalcrops: false
   share_color_jitter: false
   horizontal_flips: false
   gram_teacher_no_distortions: false
@@ -177,37 +175,27 @@ crops:
   - 0.225
   teacher_to_student_resolution_scale: 1.0
   use_3d_augmentation: true
-  monai: false
-  global_crops_in_slice_scale:
-  - 0.48
-  - 1.0
-  global_crops_cross_slice_scale:
-  - 0.5
-  - 1.0
-  local_crops_in_slice_scale:
-  - 0.16
-  - 0.48
-  local_crops_cross_slice_scale:
-  - 0.2
-  - 0.5
   global_crops_size_3d:
-  - 64
+  - 192
   - 192
   - 192
   local_crops_size_3d:
-  - 32
+  - 96
   - 96
   - 96
   gram_teacher_crops_size_3d: null
   patch_size_3d:
-  - 2
+  - 16
   - 16
   - 16
   ct_window:
-  - -1000.0
-  - 400.0
+  - 0
+  - 1000
   ct_mean: null
   ct_std: null
+  foreground_threshold: 100
+  foreground_crop_prob: 1.0
+  min_foreground_ratio: 0.5
 evaluation:
   eval_period_iterations: 0
   low_freq_every: 5
@@ -221,8 +209,8 @@ checkpointing:
 schedules:
   lr:
     start: 0
-    peak: 0.002
-    end: 5.0e-06
+    peak: 5.0e-05
+    end: 5.0e-05
     warmup_epochs: 10
     freeze_last_layer_epochs: 5
   weight_decay:
@@ -234,9 +222,9 @@ schedules:
     start: 0.04
     peak: 0.07
     end: 0.07
-    warmup_epochs: 30
+    warmup_epochs: 100
   momentum:
-    start: 0.992
-    peak: 0.992
-    end: 0.992
+    start: 0.994
+    peak: 0.994
+    end: 0.994
     warmup_epochs: 0

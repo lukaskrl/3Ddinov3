@@ -31,14 +31,18 @@ from dinov3.configs import setup_config, setup_job, setup_multidistillation
 from dinov3.data import (
     MaskingGenerator,
     MaskingGenerator3D,
+    MaskingGenerator3d,
     SamplerType,
     CropForegroundSwapSliceDims,
+    DataAugmentationDINO3d,
     collate_data_and_cast,
     make_data_loader,
     make_dataset,
     make_dataset_3d,
     CombinedDataLoader,
 )
+from monai.transforms import Compose, LoadImaged, ScaleIntensityRangePercentilesd, Lambdad
+import random
 from dinov3.logging import MetricLogger, setup_logging
 from dinov3.train.cosine_lr_scheduler import CosineScheduler, linear_warmup_cosine_decay
 from dinov3.train.multidist_meta_arch import MultiDistillationMetaArch
@@ -276,21 +280,12 @@ def build_data_loader_from_cfg(
 ):
     # Collate function
     if getattr(cfg.crops, "use_3d_augmentation", False):
-        # 3D volumetric case: compute patch grid (D_p, H_p, W_p)
-        D_size, H_size, W_size = cfg.crops.global_crops_size_3d
-        # Patch sizes for depth/height/width; fall back to (2, patch_size, patch_size) if not set
-        patch_size_d, patch_size_h, patch_size_w = (
-            cfg.crops.patch_size_3d
-            if getattr(cfg.crops, "patch_size_3d", None) is not None
-            else (2, cfg.student.patch_size, cfg.student.patch_size)
-        )
-        D_p = D_size // patch_size_d
-        H_p = H_size // patch_size_h
-        W_p = W_size // patch_size_w
-        n_tokens = D_p * H_p * W_p
-        mask_generator = MaskingGenerator3D(
-            input_size=(D_p, H_p, W_p),
-            max_num_patches=int(0.5 * n_tokens),
+        # 3D volumetric case using V2-style MONAI data loading pipeline
+        img_size = cfg.crops.global_crops_size
+        patch_size = cfg.student.patch_size
+        n_tokens = (img_size // patch_size) ** 3
+        mask_generator = MaskingGenerator3d(
+            input_size=(img_size // patch_size, img_size // patch_size, img_size // patch_size)
         )
     else:
         # Standard 2D image case
@@ -330,16 +325,59 @@ def build_data_loader_from_cfg(
     num_workers = cfg.train.num_workers
     dataset_path = cfg.train.dataset_path
 
-    dataset = make_dataset(
-        dataset_str=dataset_path,
-        transform=model.build_data_augmentation_dino(cfg),
-        target_transform=lambda _: (),
-    )
+    if getattr(cfg.crops, "use_3d_augmentation", False):
+        # V2-style MONAI data loading: JSON datalist → CacheNTransDataset
+        # with LoadImaged, percentile scaling, foreground cropping, and
+        # DataAugmentationDINO3d augmentations.
+        def random_select_time(x):
+            """If time axis exists, select a random time slice."""
+            if x.shape[0] > 1:
+                t = random.randint(0, x.shape[0] - 1)
+                x = x[t:t + 1]
+            return x
 
-    if isinstance(dataset, torch.utils.data.IterableDataset):
-        sampler_type = SamplerType.INFINITE
+        data_transform = Compose(
+            [
+                LoadImaged(keys=["image"], ensure_channel_first=True),
+                Lambdad(keys=["image"], func=random_select_time),
+                Lambdad(
+                    keys=["image"],
+                    func=lambda x: torch.nan_to_num(x, torch.nanmean(x).item()),
+                ),  # replace NaNs with mean
+                ScaleIntensityRangePercentilesd(
+                    keys=["image"], lower=0.05, upper=99.95, b_min=-1, b_max=1, clip=True
+                ),
+                CropForegroundSwapSliceDims(select_fn=lambda x: x > -1),
+                DataAugmentationDINO3d(
+                    cfg.crops.global_crops_in_slice_scale,
+                    cfg.crops.global_crops_cross_slice_scale,
+                    cfg.crops.local_crops_in_slice_scale,
+                    cfg.crops.local_crops_cross_slice_scale,
+                    cfg.crops.local_crops_number,
+                    global_crops_size=cfg.crops.global_crops_size,
+                    local_crops_size=cfg.crops.local_crops_size,
+                ),
+            ]
+        )
+
+        dataset = make_dataset_3d(
+            dataset_path=dataset_path,
+            cache_path=getattr(cfg.train, "cache_dir", None),
+            data_min_axis_size=getattr(cfg.train, "data_min_axis_size", 24),
+            transform=data_transform,
+        )
+        sampler_type = SamplerType.SHARDED_INFINITE
     else:
-        sampler_type = SamplerType.SHARDED_INFINITE if cfg.train.cache_dataset else SamplerType.INFINITE
+        dataset = make_dataset(
+            dataset_str=dataset_path,
+            transform=model.build_data_augmentation_dino(cfg),
+            target_transform=lambda _: (),
+        )
+
+        if isinstance(dataset, torch.utils.data.IterableDataset):
+            sampler_type = SamplerType.INFINITE
+        else:
+            sampler_type = SamplerType.SHARDED_INFINITE if cfg.train.cache_dataset else SamplerType.INFINITE
 
     data_loader = make_data_loader(
         dataset=dataset,
@@ -543,10 +581,17 @@ def do_train(cfg, model, resume=False):
                     )
 
             # Reduce total_loss to check for NaNs, reduce metrics for logging
-            total_loss_all_ranks = total_loss.new_empty(distributed.get_subgroup_size())
+            if not type(total_loss) is torch.Tensor:
+                total_loss = torch.Tensor.clone(total_loss)
+            total_loss_detached = total_loss.detach().reshape(1)
+            total_loss_all_ranks = torch.empty(
+                (distributed.get_subgroup_size(),),
+                device=total_loss_detached.device,
+                dtype=total_loss_detached.dtype,
+            )
             torch.distributed.all_gather_into_tensor(
                 total_loss_all_ranks,
-                total_loss.detach(),
+                total_loss_detached,
                 group=distributed.get_process_subgroup(),
             )
             total_loss = total_loss_all_ranks.mean()

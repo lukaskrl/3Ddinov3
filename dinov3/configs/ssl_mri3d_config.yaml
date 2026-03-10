@@ -79,13 +79,13 @@ gram:
 train:
   batch_size_per_gpu: 96  # smaller for 3D memory footprint / testing
   gradient_accumulation_steps: 1  # Number of micro-batches to accumulate before each optimizer step
-  dataset_path: CTVolume:root=/home/lukas/data/brain-t1-dataset
+  dataset_path: /home/lukas/data/braint1.json  # JSON datalist for MONAI CacheNTransDataset
   data_config: null
   output_dir: ./work_dir/sanity_check
   saveckp_freq: 20
   seed: 0
-  num_workers: 16
-  OFFICIAL_EPOCH_LENGTH: 1000   # shorter for quick tests
+  num_workers: 32
+  OFFICIAL_EPOCH_LENGTH: 1000 
   monitor_gradient_norm: true
   chunk_schedule: []
   use_teacher_head: true
@@ -98,6 +98,8 @@ train:
   cudagraphs: false
   sharded_eval_checkpoint: false
   cache_dataset: true
+  data_min_axis_size: 24  # Filter samples whose smallest spatial axis is below this
+  cache_dir: ./cache  # Path for MONAI CacheNTransDataset cache directory
 
 student:
   arch: vit3d_large
@@ -163,58 +165,49 @@ optim:
   warmup_epochs: null              # Reduced warmup so learning starts earlier (was 20)
   min_lr: null               # Lower than peak LR for proper decay
   schedule_trunc_extra: null
-  clip_grad: 30.0
-  freeze_last_layer_epochs: 5 # freeze last layer to stabilize training
+  clip_grad: 3.0
+  freeze_last_layer_epochs: 1 # freeze last layer to stabilize training
   scaling_rule: sqrt_wrt_1024            # Disable LR downscaling; use full lr
   patch_embed_lr_mult: 0.2
   dino_head_wd_multiplier: 1.0
-  layerwise_decay: 0.98
+  layerwise_decay: 0.9
   multi_tensor_optim: true
   dump_fsdp_weights_path: ""
   adamw_beta1: 0.9
-  adamw_beta2: 0.99
+  adamw_beta2: 0.999
 
 crops:
   local_crops_number: 8
+  # These scales are kept for 2D fallback but not used when use_3d_augmentation is true
   global_crops_scale:
     - 0.05
     - 0.5
   local_crops_scale:
     - 0.001
     - 0.05
+  # Scalar crop sizes used for n_tokens calculation and DataAugmentationDINO3d
+  global_crops_size: 96
+  local_crops_size: 48
   global_local_crop_pairs_ratios: 1.0
   localcrops_subset_of_globalcrops: true
   horizontal_flips: false
   gram_teacher_no_distortions: false
 
-  # 3D CT‑specific options (only these are used in this config)
+  # 3D MRI-specific options — V2-style MONAI data loading
   use_3d_augmentation: true
-  # (D, H, W) in voxels for global crops
-  global_crops_size_3d:
-    - 96
-    - 96
-    - 96
-  local_crops_size_3d:
-    - 48
-    - 48
-    - 48
-  # When using ema_teacher=True for Gram, we reuse the student/teacher global crops
-  # so no separate Gram teacher crop size is needed.
-  gram_teacher_crops_size_3d: null
-  patch_size_3d:
-    - 16     # depth
-    - 16    # height
-    - 16   # width
-  ct_window:
-    - 0
-    - 1000
-  ct_mean: null
-  ct_std: null
-
-  # Foreground cropping parameters
-  foreground_threshold: 100    # HU threshold for foreground (above this is foreground)
-  foreground_crop_prob: 1.0       # Probability of using foreground-biased cropping
-  min_foreground_ratio: 0.5       # Minimum foreground ratio required in crop
+  # Separate in-slice/cross-slice crop scales (used by DataAugmentationDINO3d)
+  global_crops_in_slice_scale:
+    - 0.48
+    - 1.0
+  global_crops_cross_slice_scale:
+    - 0.5
+    - 1.0
+  local_crops_in_slice_scale:
+    - 0.16
+    - 0.48
+  local_crops_cross_slice_scale:
+    - 0.2
+    - 0.5
 
 evaluation:
   eval_period_iterations: 0    # disable periodic eval
@@ -231,8 +224,8 @@ checkpointing:
 schedules:
   lr:
     start: 0
-    peak: 5.0e-05
-    end: 5.0e-03
+    peak: 0.002
+    end: 5.0e-06
     warmup_epochs: 10
     freeze_last_layer_epochs: 5
   weight_decay:
@@ -246,7 +239,7 @@ schedules:
     end: 0.07
     warmup_epochs: 30
   momentum:
-    start: 0.994
-    peak: 0.994
-    end: 0.994
+    start: 0.992
+    peak: 0.992
+    end: 0.992
     warmup_epochs: 0

@@ -14,6 +14,9 @@ Run from the repo root:
 import os
 import sys
 from pathlib import Path
+from typing import Optional
+import json
+import argparse
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -23,62 +26,117 @@ import torch
 import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
-
+from matplotlib.axes import Axes
+from monai.transforms.compose import Compose
+from monai.transforms.io.dictionary import LoadImaged
+from monai.transforms.utility.dictionary import Lambdad
+from monai.transforms.intensity.dictionary import ScaleIntensityRangePercentilesd
+from monai.transforms import EnsureChannelFirstd
 
 import dinov3.distributed as distributed
 from dinov3.configs import DinoV3SetupArgs, setup_config
-from dinov3.data.datasets.ct_volume import CTVolumeDataset
 from dinov3.data.collate import collate_data_and_cast
 from dinov3.data.masking import MaskingGenerator3D
+from dinov3.data import DataAugmentationDINO3d, CropForegroundSwapSliceDims
+from dinov3.data.loaders import make_dataset_3d
 from dinov3.train.ssl_meta_arch import SSLMetaArch
+import random
 
 
-def _parse_ct_root_from_cfg(cfg) -> str:
+def _move_batch_to_device(batch: dict, device: torch.device) -> dict:
     """
-    Parse the CTVolume root path from cfg.train.dataset_path, which looks like:
-      'CTVolume:root=/path/to/data'
+    Move all tensors in a batch dictionary to the specified device.
+    
+    Args:
+        batch: Dictionary potentially containing tensors
+        device: Target device
+    
+    Returns:
+        Batch with all tensors moved to device
     """
-    ds_str = cfg.train.dataset_path
-    tokens = ds_str.split(":")
-    if tokens[0] != "CTVolume":
-        raise ValueError(f"Expected CTVolume dataset, got {tokens[0]}")
-    root = None
-    for token in tokens[1:]:
-        key, value = token.split("=")
-        if key == "root":
-            root = value
-    if root is None:
-        raise ValueError(f"Could not find 'root=' in cfg.train.dataset_path={ds_str}")
-    return root
+    result = {}
+    for key, value in batch.items():
+        if isinstance(value, torch.Tensor):
+            result[key] = value.to(device)
+        elif isinstance(value, list):
+            result[key] = [v.to(device) if isinstance(v, torch.Tensor) else v for v in value]
+        else:
+            result[key] = value
+    return result
+
+def _load_raw_volume_for_visualization(cfg) -> torch.Tensor:
+    """
+    Load a raw volume from the JSON datalist for visualization.
+    Applies minimal preprocessing (loading and ensuring channel-first format).
+    
+    Returns:
+        volume: Tensor of shape (C, D, H, W)
+    """
+    dataset_path = cfg.train.dataset_path
+    
+    # Load datalist
+    with open(dataset_path, 'r') as json_f:
+        datalist = json.load(json_f)
+    
+    if len(datalist) == 0:
+        raise RuntimeError(f"No samples found in datalist: {dataset_path}")
+    
+    # Get first sample's image path
+    first_sample = datalist[0]
+    image_path = first_sample['image']
+    
+    # Build minimal transform to load and prepare the volume
+    minimal_transform = Compose([
+        LoadImaged(keys=['image'], ensure_channel_first=True),
+        Lambdad(keys=['image'], func=lambda x: torch.nan_to_num(x, torch.nanmean(x).item())),
+    ])
+    
+    data = {'image': image_path}
+    data = minimal_transform(data)
+    volume = data['image']  # (C, D, H, W)
+    
+    return volume
 
 
-def _build_single_sample_batch(cfg, aug, volume: torch.Tensor, disable_flips=False):
+def _build_single_sample_batch(cfg, volume: torch.Tensor, disable_flips=False):
     """
     Apply 3D DINO augmentation to a single volume and collate it into
     a training-style batch (with masks and mask_indices_list) for one sample.
     
+    This mirrors the training pipeline's preprocessing + augmentation.
+    
     Args:
-        disable_flips: If True, temporarily disable horizontal_flips for visualization.
+        cfg: DINOv3 config
+        volume: Raw CT volume tensor (C, D, H, W)
+        disable_flips: If True, disable spatial flips for consistent visualization.
     """
-    # Temporarily disable flips if requested (for consistent visualization)
-    original_flip_setting = aug.horizontal_flips
-    if disable_flips:
-        aug.horizontal_flips = False
+    # 1) Build the same augmentation used in training
+    aug = DataAugmentationDINO3d(
+        global_crops_in_slice_scale=cfg.crops.global_crops_in_slice_scale,
+        global_crops_cross_slice_scale=cfg.crops.global_crops_cross_slice_scale,
+        local_crops_in_slice_scale=cfg.crops.local_crops_in_slice_scale,
+        local_crops_cross_slice_scale=cfg.crops.local_crops_cross_slice_scale,
+        local_crops_number=cfg.crops.local_crops_number,
+        global_crops_size=cfg.crops.global_crops_size,
+        local_crops_size=cfg.crops.local_crops_size,
+    )
     
-    # 1) Apply augmentation
-    sample_dict = aug(volume)  # keys: global_crops, local_crops, ...
-    
-    # Restore original flip setting
-    aug.horizontal_flips = original_flip_setting
+    # 2) Apply augmentation
+    sample_dict, _ = aug(volume)  # Returns (output_dict, None)
     
     sample = (sample_dict, 0)  # dummy target
 
-    # 2) Compute patch grid and masking generator from config
-    D_g, H_g, W_g = tuple(cfg.crops.global_crops_size_3d)
-    D_p, H_p, W_p = tuple(cfg.crops.patch_size_3d)
-
-    n_tokens = (D_g // D_p) * (H_g // H_p) * (W_g // W_p)
-    grid_size = (D_g // D_p, H_g // H_p, W_g // W_p)
+    # 3) Compute patch grid and masking generator from config
+    # For legacy DataAugmentationDINO3d, crops are scalar sizes (96, 48)
+    # We need to compute patch divisor based on config
+    patch_size = cfg.crops.global_crops_size  # This should be 96 based on config
+    D_p = H_p = W_p = 16  # Assuming 16x16x16 patches; adjust if needed from cfg.crops.patch_size_3d if available
+    
+    # For scalar crop sizes, assume they're isotropic (D=H=W)
+    D_g = H_g = W_g = cfg.crops.global_crops_size
+    
+    n_tokens = (D_g // D_p) * (H_g // D_p) * (W_g // D_p)
+    grid_size = (D_g // D_p, H_g // D_p, W_g // D_p)
 
     mask_gen = MaskingGenerator3D(
         input_size=grid_size,
@@ -102,11 +160,11 @@ def _build_single_sample_batch(cfg, aug, volume: torch.Tensor, disable_flips=Fal
 
 
 def _overlay_patch_grid_2d(
-    ax: plt.Axes,
+    ax: Axes,
     height: int,
     width: int,
-    patch_h: int,
-    patch_w: int,
+    patch_h: Optional[int] = None,
+    patch_w: Optional[int] = None,
     *,
     color: str = "red",
     alpha: float = 0.35,
@@ -138,7 +196,7 @@ def _visualize_crops(
     Assumes C=1 (single-channel CT).
     
     Args:
-        sample_dict: Output from DataAugmentationDINO3D
+        sample_dict: Output from DataAugmentationDINO3d (keys: global_crops, local_crops)
         original_volume: Optional original volume (C, D, H, W) to show for comparison
         show_original: If True and original_volume provided, show original first
     """
@@ -225,13 +283,8 @@ def _visualize_crops(
     for row, (vol, label) in enumerate(zip(crops_to_plot, crop_labels)):
         _plot_volume(axes[row], vol, label, patch_size_3d)
 
-    if foreground_threshold is None:
-        fg_title = "foreground_threshold: N/A"
-    else:
-        fg_title = f"foreground_threshold: {foreground_threshold}"
     plt.suptitle(
-        "3D CT Crops Visualization\n"
-        f"({fg_title}; Note: horizontal_flips may cause crops to appear flipped)",
+        "3D CT Crops Visualization (DataAugmentationDINO3d)",
         fontsize=12,
         y=0.995,
     )
@@ -489,6 +542,7 @@ if __name__ == "__main__":
         distributed.enable()
 
     # --- Load config ---
+    device = "cuda:1" if torch.cuda.is_available() else "cpu"
     config_file = "/home/lukas/3Ddinov3/dinov3/configs/ssl_mri3d_config.yaml"
     setup_args = DinoV3SetupArgs(
         config_file=config_file,
@@ -503,38 +557,31 @@ if __name__ == "__main__":
     # the student/teacher on real devices instead of "meta".
     cfg.debug_no_meta = True
 
-    # --- Dataset / volume ---
-    data_root = _parse_ct_root_from_cfg(cfg)
-    dataset = CTVolumeDataset(root=data_root)
-    if len(dataset) == 0:
-        raise RuntimeError(f"No volumes found under {data_root}")
+    # --- Load raw volume from JSON datalist ---
+    volume = _load_raw_volume_for_visualization(cfg).to(device)
+    print(f"Loaded volume shape: {volume.shape}")
 
-    volume, _ = dataset[0]  # (C, D, H, W)
-
-    # --- Build model + augmentation using the standard (non-meta) path ---
-    model = SSLMetaArch(cfg)
+    # --- Build model (for loss computation only) ---
+    model = SSLMetaArch(cfg).to(device)
     model.init_weights()
-    if torch.cuda.is_available():
-        model.cuda()
-    aug = model.build_data_augmentation_dino(cfg)
     print("config and model loaded.", cfg)
 
-    # Print foreground cropping configuration
-    print("=== Foreground Cropping Configuration ===")
-    print(f"foreground_threshold: {getattr(aug, 'foreground_threshold', 'N/A')}")
-    print(f"foreground_crop_prob: {getattr(aug, 'foreground_crop_prob', 'N/A')}")
-    print(f"min_foreground_ratio: {getattr(aug, 'min_foreground_ratio', 'N/A')}")
+    # Print augmentation configuration
+    print("=== 3D Augmentation Configuration ===")
+    print(f"global_crops_size: {cfg.crops.global_crops_size}")
+    print(f"local_crops_size: {cfg.crops.local_crops_size}")
+    print(f"local_crops_number: {cfg.crops.local_crops_number}")
     print()
 
     # --- Build one-sample batch and visualize crops ---
     print("\n=== Visualizing crops WITH augmentation (including random flips) ===")
-    batch, sample_dict = _build_single_sample_batch(cfg, aug, volume, disable_flips=False)
+    batch, sample_dict = _build_single_sample_batch(cfg, volume, disable_flips=False)
     _visualize_crops(
         sample_dict,
         original_volume=volume,
         show_original=True,
-        foreground_threshold=getattr(aug, "foreground_threshold", None),
-        patch_size_3d=tuple(cfg.crops.patch_size_3d),
+        foreground_threshold=None,
+        patch_size_3d=None,  # Not defined for legacy DataAugmentationDINO3d
     )
 
 
@@ -543,6 +590,9 @@ if __name__ == "__main__":
 
 #%%
     # --- Compute losses (DINO global/local + iBOT) for this one batch ---
+    # Move batch to device
+    batch = _move_batch_to_device(batch, device)
+    
     teacher_temp = cfg.teacher.teacher_temp
 
     loss, metrics = model.forward_backward(

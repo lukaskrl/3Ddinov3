@@ -24,7 +24,7 @@ from dinov3.train.ssl_meta_arch import SSLMetaArch
 
 # Hardcoded DCP checkpoint directory (example)
 # example path /home/lukas/3Ddinov3/work_dir/mri_full_training_centering/ckpt/90999
-DCP_DIR = Path("/home/lukas/3Ddinov3/work_dir/big_batch/ckpt/23399")
+DCP_DIR = Path("/home/lukas/3Ddinov3/work_dir/stabilized_training_layer_norm_fix/ckpt/74599")
 
 def main() -> None:
     # Derive config and output paths from the hardcoded checkpoint dir

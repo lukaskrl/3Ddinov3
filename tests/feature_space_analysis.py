@@ -40,7 +40,7 @@ from dinov3.models import build_model_for_eval
 
 #Paths and basic config
 # Path to a single distributed checkpoint directory (integer‑named subdir)
-path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/vit_large_patch8/checkpoint_40399.pth"
+path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/stabilized_training_layer_norm_fix/checkpoint_74599.pth"
 # path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/checkpoint_final.pth"
 
 # Select which GPU to use (0-based index). Must be set before any CUDA ops.
@@ -52,10 +52,10 @@ path_to_data = "/home/lukas/data/brain-t1-dataset"
 
 # Training config used for this checkpoint (3D CT DINOv3 config)
 # path_to_config = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/config.yaml"
-path_to_config = "/home/lukas/3Ddinov3/work_dir/vit_large_patch8/config.yaml"
+path_to_config = "/home/lukas/3Ddinov3/work_dir/stabilized_training_layer_norm_fix/config.yaml"
 
 # Select which GPU to use (0-based index). Must be set before any CUDA ops.
-gpu_id = 0
+gpu_id = 1
 os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
 # K-means analysis settings

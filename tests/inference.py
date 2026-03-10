@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
+
 import nibabel as nib
 from scipy import ndimage
 
@@ -22,7 +23,7 @@ from dinov3.models import build_model_for_eval
 
 #Paths and basic config
 # Path to a single distributed checkpoint directory (integer‑named subdir)
-path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/big_batch/checkpoint_23399.pth"
+path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/stabilized_training_layer_norm_fix/checkpoint_74599.pth"
 # path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/mri_full_training_centering.pth"
 
 
@@ -36,17 +37,18 @@ path_to_data = "/home/lukas/data/brain-t1-dataset"
 
 # Training config used for this checkpoint (3D CT DINOv3 config)
 # path_to_config = "/home/lukas/3Ddinov3/dinov3/configs/ssl_mri3d_config.yaml"
-path_to_config = "/home/lukas/3Ddinov3/work_dir/big_batch/config.yaml"
+path_to_config = "/home/lukas/3Ddinov3/work_dir/stabilized_training_layer_norm_fix/config.yaml"
 # path_to_config = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/config.yaml"
 
 # Optional resizing for more fine-grained features
 sample_path = "/home/lukas/data/brain-t1-dataset/a9e965db61d02e2772f4819290c2362f.nii.gz"
 # sample_path = None
-resize_shape = (800, 800, 800)
+resize_shape = None
 resize_scale = None
 # sample_path = "/home/lukas/data/OASIS/nifti_converted/OAS1_0001_MR1/PROCESSED/MPRAGE/T88_111/OAS1_0001_MR1_mpr_n4_anon_111_t88_gfc.nii.gz"  # If set, must be a .npy or .nii.gz file path to a single volume for testing instead of dataset
 head_mask_threshold = None
 use_head_mask_for_pca = False  # If True: fit PCA on masked feature voxels and visualize PCA maps only within mask.
+pca_component_offset = 10  # Which PCA component to start from (0=components 0-2, 3=components 3-5, etc.)
 
 def load_backbone_from_checkpoint(
     config_file: str,
@@ -194,18 +196,6 @@ def _show_activation_visuals(activation_volume: np.ndarray) -> None:
     fig.tight_layout()
     plt.show()
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    axes[0].imshow(mip_d, cmap="viridis")
-    axes[0].set_title("MIP over D")
-    axes[1].imshow(mip_h, cmap="viridis")
-    axes[1].set_title("MIP over H")
-    axes[2].imshow(mip_w, cmap="viridis")
-    axes[2].set_title("MIP over W")
-    for ax in axes:
-        ax.axis("off")
-    fig.tight_layout()
-    plt.show()
-
     fig = plt.figure(figsize=(6, 4))
     plt.hist(activation_volume.ravel(), bins=100, color="#4C78A8", alpha=0.9)
     plt.title("Activation magnitude histogram")
@@ -314,8 +304,9 @@ def make_head_mask_and_crop(
 if not torch.cuda.is_available():
     raise RuntimeError("CUDA is required for this 3D DINOv3 inference script.")
 
+
+
 # After setting CUDA_VISIBLE_DEVICES, the selected GPU is cuda:0
-torch.cuda.set_device(0)
 
 # --- Load model ---
 print(f"Loading model from config={path_to_config} and checkpoint={path_to_checkpoint}")
@@ -323,7 +314,7 @@ model, autocast_dtype, config = load_backbone_from_checkpoint(
     config_file=path_to_config,
     ckpt_dir=path_to_checkpoint,
 )
-
+#%%
 # --- Load data ---
 if sample_path is not None and Path(sample_path).is_file():
     # Load a specific .nii.gz or .npy file directly
@@ -385,11 +376,12 @@ if resize_shape is not None:
         mode="trilinear",
         align_corners=False,
     )[0]
-    cropped_head_mask_np = F.interpolate(
-        torch.from_numpy(cropped_head_mask_np.astype(np.float32))[None, None, ...],
-        size=resize_shape,
-        mode="nearest",
-    )[0, 0].numpy()
+    if head_mask_threshold is not None:
+        cropped_head_mask_np = F.interpolate(
+            torch.from_numpy(cropped_head_mask_np.astype(np.float32))[None, None, ...],
+            size=resize_shape,
+            mode="nearest",
+        )[0, 0].numpy()
 elif resize_scale is not None:
     volume = F.interpolate(
         volume.unsqueeze(0),
@@ -495,7 +487,9 @@ with torch.no_grad():
             print("Using full-volume PCA fit.")
 
     # PCA over channel dimension using scikit-learn
-    pca = PCA(n_components=min(3, feats_np_fit.shape[1]))
+    # Compute enough components to accommodate the offset
+    n_components_needed = min(pca_component_offset + 3, feats_np_fit.shape[1])
+    pca = PCA(n_components=n_components_needed)
     pca.fit(feats_np_fit)
     pca_proj = pca.transform(feats_np_all)  # (N, n_components)
 
@@ -504,21 +498,24 @@ with torch.no_grad():
     if use_head_mask_for_pca:
         activation = np.where(feature_mask_np, activation, 0.0)
 
-    # RGB visualization: first 3 PCA components normalized to [0, 1]
+    # RGB visualization: 3 PCA components starting from pca_component_offset normalized to [0, 1]
     rgb_channels = []
-    for i in range(min(3, pca_proj.shape[1])):
-        ch = pca_proj[:, i].reshape(d_f, h_f, w_f)
-        if use_head_mask_for_pca and mask_flat_np.any():
-            ch_masked = ch[feature_mask_np]
-            ch_min, ch_max = ch_masked.min(), ch_masked.max()
+    for i in range(3):
+        component_idx = pca_component_offset + i
+        if component_idx < pca_proj.shape[1]:
+            ch = pca_proj[:, component_idx].reshape(d_f, h_f, w_f)
+            if use_head_mask_for_pca and mask_flat_np.any():
+                ch_masked = ch[feature_mask_np]
+                ch_min, ch_max = ch_masked.min(), ch_masked.max()
+            else:
+                ch_min, ch_max = ch.min(), ch.max()
+            ch_norm = (ch - ch_min) / (ch_max - ch_min + 1e-8)
+            if use_head_mask_for_pca:
+                ch_norm = np.where(feature_mask_np, ch_norm, 0.0)
+            rgb_channels.append(ch_norm)
         else:
-            ch_min, ch_max = ch.min(), ch.max()
-        ch_norm = (ch - ch_min) / (ch_max - ch_min + 1e-8)
-        if use_head_mask_for_pca:
-            ch_norm = np.where(feature_mask_np, ch_norm, 0.0)
-        rgb_channels.append(ch_norm)
-    while len(rgb_channels) < 3:
-        rgb_channels.append(np.zeros((d_f, h_f, w_f)))
+            # If we don't have this component, fill with zeros
+            rgb_channels.append(np.zeros((d_f, h_f, w_f)))
     pca_rgb = np.stack(rgb_channels, axis=-1)  # (D, H, W, 3)
 
     # Cosine similarity to center feature vector
@@ -569,12 +566,17 @@ for rank, (idx, val) in enumerate(zip(topk_idx.tolist(), topk_vals.tolist()), st
 
 _show_activation_visuals(activation_np)
 
-print("\nPCA explained variance ratio (first 3 components):")
-for i, var in enumerate(pca.explained_variance_ratio_[:3]):
-    print(f"  PC{i+1}: {var:.4f}")
+print(f"\nPCA explained variance ratio (components {pca_component_offset}-{pca_component_offset+2}):")
+for i in range(3):
+    component_idx = pca_component_offset + i
+    if component_idx < len(pca.explained_variance_ratio_):
+        var = pca.explained_variance_ratio_[component_idx]
+        print(f"  PC{component_idx+1}: {var:.4f}")
+    else:
+        print(f"  PC{component_idx+1}: N/A (not computed)")
 
 # Visualize PCA-RGB at center slices
-print("\nPCA-RGB visualization (first 3 components as RGB)...")
+print(f"\nPCA-RGB visualization (components {pca_component_offset}-{pca_component_offset+2} as RGB)...")
 d_mid, h_mid, w_mid = d_f // 2, h_f // 2, w_f // 2
 axial_rgb = pca_rgb[d_mid, :, :]
 coronal_rgb = pca_rgb[:, h_mid, :, :]
@@ -582,11 +584,11 @@ sagittal_rgb = pca_rgb[:, :, w_mid, :]
 
 fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 axes[0].imshow(axial_rgb, interpolation="nearest")
-axes[0].set_title("PCA-RGB center axial (D)")
+axes[0].set_title(f"PCA-RGB center axial (PC{pca_component_offset+1}-{pca_component_offset+3})")
 axes[1].imshow(coronal_rgb, interpolation="nearest")
-axes[1].set_title("PCA-RGB center coronal (H)")
+axes[1].set_title(f"PCA-RGB center coronal (PC{pca_component_offset+1}-{pca_component_offset+3})")
 axes[2].imshow(sagittal_rgb, interpolation="nearest")
-axes[2].set_title("PCA-RGB center sagittal (W)")
+axes[2].set_title(f"PCA-RGB center sagittal (PC{pca_component_offset+1}-{pca_component_offset+3})")
 for ax in axes:
 
     ax.axis("off")
@@ -601,7 +603,7 @@ plt.show()
 #%%
 # --- Cosine similarity visualization based on point coordinates ---
 print("\n=== Cosine similarity to point feature ===")
-point_coordinates = (20, 15, 10)  # (D, H, W) in feature space
+point_coordinates = (20, 25, 10)  # (D, H, W) in feature space
 
 
 # Clamp coordinates to valid range

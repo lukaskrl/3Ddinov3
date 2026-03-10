@@ -76,6 +76,7 @@ class SSLMetaArch(nn.Module):
             hidden_dim=cfg.dino.head_hidden_dim,
             bottleneck_dim=cfg.dino.head_bottleneck_dim,
             nlayers=cfg.dino.head_nlayers,
+            norm_last_layer=cfg.dino.head_norm_last_layer,
         )
         student_model_dict["dino_head"] = dino_head_class()
         teacher_model_dict["dino_head"] = dino_head_class()
@@ -120,6 +121,7 @@ class SSLMetaArch(nn.Module):
             hidden_dim=cfg.ibot.head_hidden_dim,
             bottleneck_dim=cfg.ibot.head_bottleneck_dim,
             nlayers=cfg.ibot.head_nlayers,
+            norm_last_layer=cfg.ibot.head_norm_last_layer,
         )
         student_model_dict["ibot_head"] = ibot_head_class()
         teacher_model_dict["ibot_head"] = ibot_head_class()
@@ -386,6 +388,13 @@ class SSLMetaArch(nn.Module):
         mask_indices_list = data["mask_indices_list"].cuda(non_blocking=True)
         masks_weight = data["masks_weight"].cuda(non_blocking=True)
         n_masked_patches_tensor = data["n_masked_patches"].cuda(non_blocking=True)
+
+        # Strip MONAI MetaTensor metadata to prevent torch.compile recompilation
+        # issues caused by metadata tracking through the compiled model.
+        if not type(global_crops) is torch.Tensor:
+            global_crops = torch.Tensor.clone(global_crops)
+        if not type(local_crops) is torch.Tensor:
+            local_crops = torch.Tensor.clone(local_crops)
 
         if self.has_gram_teacher:
             assert "collated_gram_teacher_crops" in data, (
@@ -754,7 +763,7 @@ class SSLMetaArch(nn.Module):
         n_global_crops = student_global["cls_after_head"].shape[0]
         n_local_crops = student_local["cls_after_head"].shape[0]
         loss_dict = {}
-        loss_accumulator = 0.0
+        loss_accumulator = student_global["cls_after_head"].new_tensor(0.0)
 
         # Loss scales like in DINOv2, these are multiplied with the loss weights from the config
         dino_global_terms = (

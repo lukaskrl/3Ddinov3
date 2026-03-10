@@ -6,6 +6,7 @@
 import torch
 import torch.nn as nn
 from torch.nn.init import trunc_normal_
+from torch.nn.utils import weight_norm
 
 
 class DINOHead(nn.Module):
@@ -18,6 +19,7 @@ class DINOHead(nn.Module):
         hidden_dim=2048,
         bottleneck_dim=256,
         mlp_bias=True,
+        norm_last_layer=False,
     ):
         super().__init__()
         nlayers = max(nlayers, 1)
@@ -29,18 +31,34 @@ class DINOHead(nn.Module):
             use_bn=use_bn,
             bias=mlp_bias,
         )
-        self.last_layer = nn.Linear(bottleneck_dim, out_dim, bias=False)
+        if norm_last_layer:
+            self.last_layer = weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
+            self.last_layer.weight_g.data.fill_(1)
+        else:
+            self.last_layer = nn.Linear(bottleneck_dim, out_dim, bias=False)
+        self.norm_last_layer = norm_last_layer
 
     def init_weights(self) -> None:
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            # Use MUCH larger std for last layer to get more variance in logits
-            # This is critical when inputs are normalized (unit norm)
-            # With temp=0.07, need std/temp > 3-5, so std > 0.21-0.35
-            if hasattr(self, 'last_layer') and m is self.last_layer:
-                trunc_normal_(m.weight, std=0.3)  # 15x larger - needed for Sinkhorn-Knopp to preserve structure
+            if hasattr(self, 'norm_last_layer') and self.norm_last_layer:
+                # With weight_norm, initialize weight_v (the actual parameter), not weight (computed property)
+                # weight_g (initialized to 1) controls the magnitude separately.
+                if hasattr(m, 'weight_v'):
+                    # This is a weight_norm'd layer - must initialize weight_v directly
+                    trunc_normal_(m.weight_v, std=0.02)
+                    if hasattr(m, 'weight_g'):
+                        # Ensure weight_g stays at 1 as intended
+                        m.weight_g.data.fill_(1)
+                else:
+                    # Fallback for non-weight_norm'd layers (shouldn't happen in practice)
+                    trunc_normal_(m.weight, std=0.02)
+            elif hasattr(self, 'last_layer') and m is self.last_layer:
+                # Without weight_norm, use larger std for the last layer
+                # so Sinkhorn-Knopp has enough logit variance to preserve structure.
+                trunc_normal_(m.weight, std=0.3)
             else:
                 trunc_normal_(m.weight, std=0.02)
             if m.bias is not None:
