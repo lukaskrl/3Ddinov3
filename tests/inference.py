@@ -15,6 +15,7 @@ from scipy import ndimage
 
 import dinov3.distributed as distributed
 from dinov3.configs import DinoV3SetupArgs, setup_config
+
 from dinov3.data.datasets.ct_volume import CTVolumeDataset
 from dinov3.data.transforms_3d import make_ct_3d_base_transform
 from dinov3.eval.setup import get_autocast_dtype
@@ -23,7 +24,7 @@ from dinov3.models import build_model_for_eval
 
 #Paths and basic config
 # Path to a single distributed checkpoint directory (integer‑named subdir)
-path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/stabilized_training_layer_norm_fix/checkpoint_74599.pth"
+path_to_checkpoint = "/home/lukas/projects/3Ddinov3/work_dir/failure_1gpu/checkpoint_51399.pth"
 # path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/mri_full_training_centering.pth"
 
 
@@ -37,13 +38,13 @@ path_to_data = "/home/lukas/data/brain-t1-dataset"
 
 # Training config used for this checkpoint (3D CT DINOv3 config)
 # path_to_config = "/home/lukas/3Ddinov3/dinov3/configs/ssl_mri3d_config.yaml"
-path_to_config = "/home/lukas/3Ddinov3/work_dir/stabilized_training_layer_norm_fix/config.yaml"
+path_to_config = "/home/lukas/projects/3Ddinov3/work_dir/failure_1gpu/config.yaml"
 # path_to_config = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/config.yaml"
 
 # Optional resizing for more fine-grained features
-sample_path = "/home/lukas/data/brain-t1-dataset/a9e965db61d02e2772f4819290c2362f.nii.gz"
-# sample_path = None
-resize_shape = None
+# sample_path = "/home/lukas/data/brain-t1-dataset/a9e965db61d02e2772f4819290c2362f.nii.gz"
+sample_path = None
+resize_shape = (1000, 1000, 1000)  # If set, must be a tuple of (D, H, W) for the desired input size. Overrides resize_scale if both are set.
 resize_scale = None
 # sample_path = "/home/lukas/data/OASIS/nifti_converted/OAS1_0001_MR1/PROCESSED/MPRAGE/T88_111/OAS1_0001_MR1_mpr_n4_anon_111_t88_gfc.nii.gz"  # If set, must be a .npy or .nii.gz file path to a single volume for testing instead of dataset
 head_mask_threshold = None
@@ -603,7 +604,7 @@ plt.show()
 #%%
 # --- Cosine similarity visualization based on point coordinates ---
 print("\n=== Cosine similarity to point feature ===")
-point_coordinates = (20, 25, 10)  # (D, H, W) in feature space
+point_coordinates = (40, 25, 30)  # (D, H, W) in feature space
 
 
 # Clamp coordinates to valid range

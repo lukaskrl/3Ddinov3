@@ -64,14 +64,14 @@ gram:
   global_teacher_resize_antialias: false
   loss_weight_schedule: null
 train:
-  batch_size_per_gpu: 96
+  batch_size_per_gpu: 48
   gradient_accumulation_steps: 1
   dataset_path: /home/lukas/data/braint1.json
   data_config: null
-  output_dir: ./work_dir/sanity_check
+  output_dir: /home/lukas/projects/3Ddinov3/work_dir/failure_1gpu
   saveckp_freq: 20
   seed: 0
-  num_workers: 32
+  num_workers: 16
   OFFICIAL_EPOCH_LENGTH: 1000
   monitor_gradient_norm: true
   chunk_schedule: []
@@ -80,7 +80,7 @@ train:
   centering: sinkhorn_knopp
   checkpointing: false
   checkpointing_full: false
-  compile: true
+  compile: false
   cudagraphs: false
   sharded_eval_checkpoint: false
   cache_dataset: true
