@@ -940,16 +940,14 @@ class SSLMetaArch(nn.Module):
         loss.backward()
 
     def update_ema(self, m):
-        if self.ema_params_lists is None:
-            student_param_list = []
-            teacher_param_list = []
-            for k in self.student.keys():
-                for ms, mt in zip(self.student[k].parameters(), self.model_ema[k].parameters()):
-                    student_param_list += [ms]
-                    teacher_param_list += [mt]
-            self.ema_params_lists = (student_param_list, teacher_param_list)
-        else:
-            student_param_list, teacher_param_list = self.ema_params_lists
+        # Important for FSDP: do not cache parameter references across iterations.
+        # Re-sharding / view changes can make cached references stale.
+        student_param_list = []
+        teacher_param_list = []
+        for k in self.student.keys():
+            for ms, mt in zip(self.student[k].parameters(), self.model_ema[k].parameters()):
+                student_param_list.append(ms)
+                teacher_param_list.append(mt)
         with torch.no_grad():
             torch._foreach_mul_(teacher_param_list, m)
             torch._foreach_add_(teacher_param_list, student_param_list, alpha=1 - m)

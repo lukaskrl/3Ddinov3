@@ -168,18 +168,18 @@ def build_schedulers_v2(cfg):
     # LR scaling rules
     lr_peak = cfg.schedules.lr.peak
     lr_end = cfg.schedules.lr.end
-    if cfg.optim.scaling_rule == "linear_wrt_256":
-        lr_peak *= cfg.train.batch_size_per_gpu * distributed.get_world_size() / 256.0
-        lr_end *= cfg.train.batch_size_per_gpu * distributed.get_world_size() / 256.0
-        logger.info(
-            f"Scaling rule {cfg.optim.scaling_rule}, LR peak {cfg.schedules.lr.peak} -> {lr_peak}, LR end {cfg.schedules.lr.end} -> {lr_end}"
-        )
-    elif cfg.optim.scaling_rule == "sqrt_wrt_1024":
-        lr_peak *= 4 * math.sqrt(cfg.train.batch_size_per_gpu * distributed.get_world_size() / 1024.0)
-        lr_end *= 4 * math.sqrt(cfg.train.batch_size_per_gpu * distributed.get_world_size() / 1024.0)
-        logger.info(
-            f"Scaling rule {cfg.optim.scaling_rule}, LR peak {cfg.schedules.lr.peak} -> {lr_peak}, LR end {cfg.schedules.lr.end} -> {lr_end}"
-        )
+    # if cfg.optim.scaling_rule == "linear_wrt_256":
+    #     lr_peak *= cfg.train.batch_size_per_gpu * distributed.get_world_size() / 256.0
+    #     lr_end *= cfg.train.batch_size_per_gpu * distributed.get_world_size() / 256.0
+    #     logger.info(
+    #         f"Scaling rule {cfg.optim.scaling_rule}, LR peak {cfg.schedules.lr.peak} -> {lr_peak}, LR end {cfg.schedules.lr.end} -> {lr_end}"
+    #     )
+    # elif cfg.optim.scaling_rule == "sqrt_wrt_1024":
+    #     lr_peak *= 4 * math.sqrt(cfg.train.batch_size_per_gpu * distributed.get_world_size() / 1024.0)
+    #     lr_end *= 4 * math.sqrt(cfg.train.batch_size_per_gpu * distributed.get_world_size() / 1024.0)
+    #     logger.info(
+    #         f"Scaling rule {cfg.optim.scaling_rule}, LR peak {cfg.schedules.lr.peak} -> {lr_peak}, LR end {cfg.schedules.lr.end} -> {lr_end}"
+    #     )
     else:
         logger.info(f"No scaling rule for {cfg.optim.scaling_rule=}")
 

@@ -24,12 +24,12 @@ from dinov3.models import build_model_for_eval
 
 #Paths and basic config
 # Path to a single distributed checkpoint directory (integer‑named subdir)
-path_to_checkpoint = "/home/lukas/projects/3Ddinov3/work_dir/failure_1gpu/checkpoint_51399.pth"
+path_to_checkpoint = "/home/lukas/projects/3Ddinov3/work_dir/test_ema_update/checkpoint_53599.pth"
 # path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/mri_full_training_centering.pth"
 
 
 # Select which GPU to use (0-based index). Must be set before any CUDA ops.
-gpu_id = 1
+gpu_id = 0
 os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
 # Directory with CT volumes stored as .npy files
@@ -38,13 +38,13 @@ path_to_data = "/home/lukas/data/brain-t1-dataset"
 
 # Training config used for this checkpoint (3D CT DINOv3 config)
 # path_to_config = "/home/lukas/3Ddinov3/dinov3/configs/ssl_mri3d_config.yaml"
-path_to_config = "/home/lukas/projects/3Ddinov3/work_dir/failure_1gpu/config.yaml"
+path_to_config = "/home/lukas/projects/3Ddinov3/work_dir/test_ema_update/config.yaml"
 # path_to_config = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/config.yaml"
 
 # Optional resizing for more fine-grained features
 # sample_path = "/home/lukas/data/brain-t1-dataset/a9e965db61d02e2772f4819290c2362f.nii.gz"
 sample_path = None
-resize_shape = (1000, 1000, 1000)  # If set, must be a tuple of (D, H, W) for the desired input size. Overrides resize_scale if both are set.
+resize_shape = (512, 512, 512)  # If set, must be a tuple of (D, H, W) for the desired input size. Overrides resize_scale if both are set.
 resize_scale = None
 # sample_path = "/home/lukas/data/OASIS/nifti_converted/OAS1_0001_MR1/PROCESSED/MPRAGE/T88_111/OAS1_0001_MR1_mpr_n4_anon_111_t88_gfc.nii.gz"  # If set, must be a .npy or .nii.gz file path to a single volume for testing instead of dataset
 head_mask_threshold = None

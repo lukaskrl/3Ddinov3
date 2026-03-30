@@ -227,11 +227,11 @@ schedules:
     peak: 0.002
     end: 5.0e-06
     warmup_epochs: 10
-    freeze_last_layer_epochs: 5
+    freeze_last_layer_epochs: 1
   weight_decay:
     start: 0.04
-    peak: 0.04
-    end: 0.04
+    peak: 0.4
+    end: 0.4
     warmup_epochs: 0
   teacher_temp:
     start: 0.04
