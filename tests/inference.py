@@ -1,6 +1,7 @@
 # %% Imports
 import os
 from pathlib import Path
+import random
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -9,6 +10,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
+from monai.transforms import Compose, CropForeground, Lambda, LoadImage, Resize, ScaleIntensityRangePercentiles
 
 import nibabel as nib
 from scipy import ndimage
@@ -16,8 +18,6 @@ from scipy import ndimage
 import dinov3.distributed as distributed
 from dinov3.configs import DinoV3SetupArgs, setup_config
 
-from dinov3.data.datasets.ct_volume import CTVolumeDataset
-from dinov3.data.transforms_3d import make_ct_3d_base_transform
 from dinov3.eval.setup import get_autocast_dtype
 from dinov3.models import build_model_for_eval
 
@@ -44,7 +44,7 @@ path_to_config = "/home/lukas/projects/3Ddinov3/work_dir/test_ema_update/config.
 # Optional resizing for more fine-grained features
 # sample_path = "/home/lukas/data/brain-t1-dataset/a9e965db61d02e2772f4819290c2362f.nii.gz"
 sample_path = None
-resize_shape = (512, 512, 512)  # If set, must be a tuple of (D, H, W) for the desired input size. Overrides resize_scale if both are set.
+resize_shape = (1024, 1024, 1024)  # If set, must be a tuple of (D, H, W) for the desired input size. Overrides resize_scale if both are set.
 resize_scale = None
 # sample_path = "/home/lukas/data/OASIS/nifti_converted/OAS1_0001_MR1/PROCESSED/MPRAGE/T88_111/OAS1_0001_MR1_mpr_n4_anon_111_t88_gfc.nii.gz"  # If set, must be a .npy or .nii.gz file path to a single volume for testing instead of dataset
 head_mask_threshold = None
@@ -79,28 +79,32 @@ def load_backbone_from_checkpoint(
     return model, autocast_dtype, config
 
 
-def build_ct_dataset(data_root: str, config) -> CTVolumeDataset:
-    """
-    Build a simple CT dataset that mirrors the preprocessing used in training:
-    windowing + normalization, but without random cropping/augmentations.
-    """
-    # Pull CT window / normalization from the config if available.
-    ct_window = getattr(config.crops, "ct_window", (0, 1000.0))
-    ct_mean = getattr(config.crops, "ct_mean", None)
-    ct_std = getattr(config.crops, "ct_std", None)
+def make_inference_transform(
+    patch_size_hw: int,
+    patch_size_d: int,
+    resize_spatial_size: tuple[int, int, int] | None = None,
+):
+    def random_select_time(x):
+        if x.shape[0] > 1:
+            t = random.randint(0, x.shape[0] - 1)
+            x = x[t:t + 1]
+        return x
 
-    # YAML may specify null -> becomes None in config
-    mean = ct_mean if ct_mean is not None else None
-    std = ct_std if ct_std is not None else None
+    transform_list = [
+        LoadImage(ensure_channel_first=True),
+        Lambda(func=random_select_time),
+        Lambda(func=lambda x: torch.nan_to_num(x, torch.nanmean(x).item())),
+        ScaleIntensityRangePercentiles(lower=0.05, upper=99.95, b_min=-1, b_max=1, clip=True),
+        CropForeground(
+            select_fn=lambda x: x > -1,
+            k_divisible=(int(patch_size_d), int(patch_size_hw), int(patch_size_hw)),
+        ),
+    ]
 
-    base_transform = make_ct_3d_base_transform(window=ct_window, mean=mean, std=std)
+    if resize_spatial_size is not None:
+        transform_list.append(Resize(spatial_size=resize_spatial_size, mode="trilinear"))
 
-    dataset = CTVolumeDataset(
-        root=data_root,
-        transform=base_transform,
-        split=None,
-    )
-    return dataset
+    return Compose(transform_list)
 
 
 def pick_first_volume_path(data_root: str) -> str:
@@ -317,33 +321,25 @@ model, autocast_dtype, config = load_backbone_from_checkpoint(
 )
 #%%
 # --- Load data ---
+patch_size_hw = int(getattr(config.student, "patch_size", 16))
+patch_size_d = int(getattr(config.student, "patch_size_d", patch_size_hw))
+transform = make_inference_transform(
+    patch_size_hw=patch_size_hw,
+    patch_size_d=patch_size_d,
+    resize_spatial_size=resize_shape,
+)
+
 if sample_path is not None and Path(sample_path).is_file():
-    # Load a specific .nii.gz or .npy file directly
-    print(f"Loading specific volume from: {sample_path}")
-    
-    # Get CT window and normalization parameters from config
-    ct_window = getattr(config.crops, "ct_window", (0, 1000.0))
-    ct_mean = getattr(config.crops, "ct_mean", None)
-    ct_std = getattr(config.crops, "ct_std", None)
-    mean = ct_mean if ct_mean is not None else None
-    std = ct_std if ct_std is not None else None
-    
-    # Create transform
-    base_transform = make_ct_3d_base_transform(window=ct_window, mean=mean, std=std)
-    
-    # Load and transform the volume
-    volume = load_single_volume_from_file(sample_path, base_transform)
-    
+    volume_path = sample_path
+    print(f"Loading specific volume from: {volume_path}")
 else:
-    # Original behavior: load from dataset
     volume_path = pick_first_volume_path(path_to_data)
     print(f"Using volume: {volume_path}")
 
-    dataset = build_ct_dataset(path_to_data, config)
-    # Find index of the chosen volume in the dataset
-    idx = dataset._paths.index(volume_path)
-
-    volume, _ = dataset[idx]  # (C, D, H, W)
+volume = transform(volume_path)
+print(f"Preprocessed volume shape: {tuple(volume.shape)}")
+if volume.ndim != 4:
+    raise RuntimeError(f"Expected preprocessed volume shape [C, D, H, W], got {tuple(volume.shape)}")
 
 
 # Visualize input volume (center slices + MIPs) before moving to GPU
@@ -370,20 +366,7 @@ if head_mask_threshold is not None:
 if resize_shape is not None and resize_scale is not None:
     raise ValueError("Set only one of resize_shape or resize_scale.")
 
-if resize_shape is not None:
-    volume = F.interpolate(
-        volume.unsqueeze(0),
-        size=resize_shape,
-        mode="trilinear",
-        align_corners=False,
-    )[0]
-    if head_mask_threshold is not None:
-        cropped_head_mask_np = F.interpolate(
-            torch.from_numpy(cropped_head_mask_np.astype(np.float32))[None, None, ...],
-            size=resize_shape,
-            mode="nearest",
-        )[0, 0].numpy()
-elif resize_scale is not None:
+if resize_scale is not None:
     volume = F.interpolate(
         volume.unsqueeze(0),
         scale_factor=resize_scale,
@@ -604,7 +587,7 @@ plt.show()
 #%%
 # --- Cosine similarity visualization based on point coordinates ---
 print("\n=== Cosine similarity to point feature ===")
-point_coordinates = (40, 25, 30)  # (D, H, W) in feature space
+point_coordinates = (40, 45, 5)  # (D, H, W) in feature space
 
 
 # Clamp coordinates to valid range

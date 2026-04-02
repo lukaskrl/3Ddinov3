@@ -79,12 +79,12 @@ gram:
 train:
   batch_size_per_gpu: 48  # smaller for 3D memory footprint / testing
   gradient_accumulation_steps: 1  # Number of micro-batches to accumulate before each optimizer step
-  dataset_path: /home/lukas/data/braint1.json  # JSON datalist for MONAI CacheNTransDataset
+  dataset_path: /home/lukas/data/full_dataset.json  # JSON datalist for MONAI CacheNTransDataset
   data_config: null
   output_dir: ./work_dir/sanity_check
   saveckp_freq: 20
   seed: 0
-  num_workers: 16
+  num_workers: 32
   OFFICIAL_EPOCH_LENGTH: 1000 
   monitor_gradient_norm: true
   chunk_schedule: []
@@ -99,7 +99,7 @@ train:
   sharded_eval_checkpoint: false
   cache_dataset: true
   data_min_axis_size: 24  # Filter samples whose smallest spatial axis is below this
-  cache_dir: ./cache  # Path for MONAI CacheNTransDataset cache directory
+  cache_dir: null # Use non-caching MONAI Dataset to avoid large on-disk cache
 
 student:
   arch: vit3d_large
@@ -219,7 +219,7 @@ evaluation:
 checkpointing:
   period: 200
   max_to_keep: 2
-  keep_every: 99999999999999999
+  keep_every: 50000  # Preserve every 50k iterations as *_keep copies for gram anchoring
 
 schedules:
   lr:

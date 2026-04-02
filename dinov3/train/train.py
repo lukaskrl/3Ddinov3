@@ -180,8 +180,8 @@ def build_schedulers_v2(cfg):
     #     logger.info(
     #         f"Scaling rule {cfg.optim.scaling_rule}, LR peak {cfg.schedules.lr.peak} -> {lr_peak}, LR end {cfg.schedules.lr.end} -> {lr_end}"
     #     )
-    else:
-        logger.info(f"No scaling rule for {cfg.optim.scaling_rule=}")
+    # else:
+    #     logger.info(f"No scaling rule for {cfg.optim.scaling_rule=}")
 
     lr = linear_warmup_cosine_decay(
         start=cfg.schedules.lr.start,

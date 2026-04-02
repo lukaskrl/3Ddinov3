@@ -12,7 +12,7 @@ from torch.utils.data import Sampler
 
 from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, Imagenette, NYU, CTVolumeDataset
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
-from monai.data import CacheNTransDataset, PersistentDataset
+from monai.data.dataset import CacheNTransDataset, Dataset
 import json
 logger = logging.getLogger("dinov3")
 
@@ -202,7 +202,7 @@ def make_data_loader(
     drop_last: bool = True,
     persistent_workers: bool = False,
     collate_fn: Optional[Callable[[List[T]], Any]] = None,
-    worker_init_fn: Optional[Callable[[List[T]], Any]] = None,
+    worker_init_fn: Optional[Callable[[int], Any]] = None,
 ):
     """
     Creates a data loader with the specified parameters.
@@ -255,7 +255,7 @@ def make_data_loader(
 def make_dataset_3d(
     *,
     dataset_path: str,
-    cache_path: str,
+    cache_path: Optional[str],
     data_min_axis_size: int,
     transform: Optional[Callable] = None,
 ):
@@ -278,7 +278,14 @@ def make_dataset_3d(
 
     # filter overly small data
     datalist = [x for x in datalist if min(x['shape'][:3]) > data_min_axis_size]
-    dataset = CacheNTransDataset(datalist, transform=transform, cache_n_trans=5, cache_dir=cache_path)
+    if transform is None:
+        raise ValueError("3D dataset requires a transform pipeline")
+    if cache_path:
+        logger.info(f"Using MONAI persistent cache at: {cache_path}")
+        dataset = CacheNTransDataset(datalist, transform=transform, cache_n_trans=5, cache_dir=cache_path)
+    else:
+        logger.info("Using MONAI non-caching Dataset (cache_dir is empty/null)")
+        dataset = Dataset(datalist, transform=transform)
 
     # Aggregated datasets do not expose (yet) these attributes, so add them.
     if not hasattr(dataset, "transform"):
