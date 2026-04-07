@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import random
+import json
 
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,7 +25,7 @@ from dinov3.models import build_model_for_eval
 
 #Paths and basic config
 # Path to a single distributed checkpoint directory (integer‑named subdir)
-path_to_checkpoint = "/home/lukas/projects/3Ddinov3/work_dir/test_ema_update/checkpoint_53599.pth"
+path_to_checkpoint = "/home/lukas/projects/3Ddinov3/work_dir/final_training_stage1_full_dataset/checkpoint_25599.pth"
 # path_to_checkpoint = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/mri_full_training_centering.pth"
 
 
@@ -32,18 +33,13 @@ path_to_checkpoint = "/home/lukas/projects/3Ddinov3/work_dir/test_ema_update/che
 gpu_id = 0
 os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-# Directory with CT volumes stored as .npy files
-path_to_data = "/home/lukas/data/brain-t1-dataset"
-
-
-# Training config used for this checkpoint (3D CT DINOv3 config)
-# path_to_config = "/home/lukas/3Ddinov3/dinov3/configs/ssl_mri3d_config.yaml"
-path_to_config = "/home/lukas/projects/3Ddinov3/work_dir/test_ema_update/config.yaml"
-# path_to_config = "/home/lukas/3Ddinov3/work_dir/mri_full_training_centering/config.yaml"
+# Training config is inferred from checkpoint parent directory: <checkpoint_parent>/config.yaml
+# (override by editing infer_config_path_from_checkpoint if needed)
 
 # Optional resizing for more fine-grained features
 # sample_path = "/home/lukas/data/brain-t1-dataset/a9e965db61d02e2772f4819290c2362f.nii.gz"
 sample_path = None
+sample_index = None  # If None, choose a random entry from the dataset JSON
 resize_shape = (1024, 1024, 1024)  # If set, must be a tuple of (D, H, W) for the desired input size. Overrides resize_scale if both are set.
 resize_scale = None
 # sample_path = "/home/lukas/data/OASIS/nifti_converted/OAS1_0001_MR1/PROCESSED/MPRAGE/T88_111/OAS1_0001_MR1_mpr_n4_anon_111_t88_gfc.nii.gz"  # If set, must be a .npy or .nii.gz file path to a single volume for testing instead of dataset
@@ -79,6 +75,16 @@ def load_backbone_from_checkpoint(
     return model, autocast_dtype, config
 
 
+def infer_config_path_from_checkpoint(checkpoint_path: str) -> str:
+    checkpoint_parent = Path(checkpoint_path).resolve().parent
+    inferred_config_path = checkpoint_parent / "config.yaml"
+    if not inferred_config_path.is_file():
+        raise FileNotFoundError(
+            f"Could not infer config path from checkpoint. Expected file: {inferred_config_path}"
+        )
+    return str(inferred_config_path)
+
+
 def make_inference_transform(
     patch_size_hw: int,
     patch_size_d: int,
@@ -107,19 +113,39 @@ def make_inference_transform(
     return Compose(transform_list)
 
 
-def pick_first_volume_path(data_root: str) -> str:
+def pick_volume_path_from_dataset_json(dataset_json_path: str, sample_index: int | None = None) -> str:
     """
-    Helper to pick the first .npy file in a directory, for convenience.
+    Helper to pick a sample image path from a MONAI-style datalist JSON.
     """
-    root_path = Path(data_root)
-    volume_files = sorted(
-        p
-        for p in root_path.iterdir()
-        if p.is_file() and (p.name.endswith(".npy") or p.name.endswith(".nii.gz"))
-    )
-    if not volume_files:
-        raise RuntimeError(f"No .npy or .nii.gz volumes found under {data_root}")
-    return str(volume_files[0])
+    dataset_path = Path(dataset_json_path)
+    if not dataset_path.is_file():
+        raise FileNotFoundError(f"Dataset JSON not found: {dataset_json_path}")
+
+    with dataset_path.open("r") as handle:
+        datalist = json.load(handle)
+
+    if not isinstance(datalist, list) or len(datalist) == 0:
+        raise RuntimeError(f"Dataset JSON is empty or invalid: {dataset_json_path}")
+
+    if sample_index is None:
+        sample_index = random.randrange(len(datalist))
+    elif sample_index < 0 or sample_index >= len(datalist):
+        raise IndexError(
+            f"sample_index={sample_index} is out of range for dataset of size {len(datalist)}"
+        )
+
+    sample = datalist[sample_index]
+    if not isinstance(sample, dict) or "image" not in sample:
+        raise KeyError(
+            f"Dataset sample must be a dict with an 'image' key. Got: {type(sample)}"
+        )
+
+    image_path = sample["image"]
+    if not isinstance(image_path, str) or not image_path:
+        raise ValueError("First sample 'image' entry is not a valid path string")
+    if not Path(image_path).is_file():
+        raise FileNotFoundError(f"Image path from dataset JSON does not exist: {image_path}")
+    return image_path
 
 
 def _strip_nii_gz_suffix(path_str: str) -> str:
@@ -314,6 +340,7 @@ if not torch.cuda.is_available():
 # After setting CUDA_VISIBLE_DEVICES, the selected GPU is cuda:0
 
 # --- Load model ---
+path_to_config = infer_config_path_from_checkpoint(path_to_checkpoint)
 print(f"Loading model from config={path_to_config} and checkpoint={path_to_checkpoint}")
 model, autocast_dtype, config = load_backbone_from_checkpoint(
     config_file=path_to_config,
@@ -333,8 +360,13 @@ if sample_path is not None and Path(sample_path).is_file():
     volume_path = sample_path
     print(f"Loading specific volume from: {volume_path}")
 else:
-    volume_path = pick_first_volume_path(path_to_data)
-    print(f"Using volume: {volume_path}")
+    dataset_json_path = getattr(config.train, "dataset_path", None)
+    if dataset_json_path is None:
+        raise RuntimeError("Config does not contain train.dataset_path")
+    volume_path = pick_volume_path_from_dataset_json(dataset_json_path, sample_index=sample_index)
+    print(
+        f"Using sample index {sample_index if sample_index is not None else 'random'} from dataset JSON ({dataset_json_path}): {volume_path}"
+    )
 
 volume = transform(volume_path)
 print(f"Preprocessed volume shape: {tuple(volume.shape)}")
@@ -587,7 +619,7 @@ plt.show()
 #%%
 # --- Cosine similarity visualization based on point coordinates ---
 print("\n=== Cosine similarity to point feature ===")
-point_coordinates = (40, 45, 5)  # (D, H, W) in feature space
+point_coordinates = (20, 15, 15)  # (D, H, W) in feature space
 
 
 # Clamp coordinates to valid range

@@ -99,7 +99,7 @@ train:
   sharded_eval_checkpoint: false
   cache_dataset: true
   data_min_axis_size: 24  # Filter samples whose smallest spatial axis is below this
-  cache_dir: null # Use non-caching MONAI Dataset to avoid large on-disk cache
+  cache_dir: null #/home/lukas/data/cache # Path for MONAI CacheNTransDataset cache directory
 
 student:
   arch: vit3d_large

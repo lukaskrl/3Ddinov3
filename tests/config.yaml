@@ -66,12 +66,12 @@ gram:
 train:
   batch_size_per_gpu: 48
   gradient_accumulation_steps: 1
-  dataset_path: /home/lukas/data/braint1.json
+  dataset_path: /home/lukas/data/full_dataset.json
   data_config: null
-  output_dir: /home/lukas/projects/3Ddinov3/work_dir/test_ema_update
+  output_dir: /home/lukas/projects/3Ddinov3/work_dir/final_training_stage1_full_dataset
   saveckp_freq: 20
   seed: 0
-  num_workers: 16
+  num_workers: 32
   OFFICIAL_EPOCH_LENGTH: 1000
   monitor_gradient_norm: true
   chunk_schedule: []
@@ -85,7 +85,7 @@ train:
   sharded_eval_checkpoint: false
   cache_dataset: true
   data_min_axis_size: 24
-  cache_dir: ./cache
+  cache_dir: null
 student:
   arch: vit3d_large
   patch_size: 16
@@ -217,18 +217,18 @@ evaluation:
 checkpointing:
   period: 200
   max_to_keep: 2
-  keep_every: 99999999999999999
+  keep_every: 50000
 schedules:
   lr:
     start: 0
     peak: 0.002
     end: 5.0e-06
     warmup_epochs: 10
-    freeze_last_layer_epochs: 5
+    freeze_last_layer_epochs: 1
   weight_decay:
     start: 0.04
-    peak: 0.04
-    end: 0.04
+    peak: 0.4
+    end: 0.4
     warmup_epochs: 0
   teacher_temp:
     start: 0.04
